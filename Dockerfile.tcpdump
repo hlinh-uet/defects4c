@@ -1,0 +1,57 @@
+# ──────────────────────────────────────────────────────────────────────
+# Dockerfile.tcpdump — image slim cho Defects4C project the-tcpdump-group___tcpdump
+#
+# Khác với `Dockerfile` gốc (build LLVM, Qt, openmpi, Java, redis, sshd...
+# phục vụ toàn bộ ~30 project của Defects4C), file này chỉ cài những gì
+# `build_meta_tcpdump.py` + `bulk_git_clone_v2.sh` + `bug_helper_v1_out2.py`
+# thực sự cần cho tcpdump: toolchain C + libpcap + Python jinja2/jmespath.
+#
+# Image kỳ vọng: ~300–500 MB (thay vì vài GB).
+#
+# Build:
+#   docker build -f Dockerfile.tcpdump -t tcpdump/defect4c:latest .
+#
+# Run (xem README của project tcpdump để biết mount volumes):
+#   docker run -d --name my_defects4c_tcpdump \
+#     -v "$(pwd)/defectsc_tpl:/src" \
+#     -v "$(pwd)/out_tmp_dirs:/out" \
+#     -v "$(pwd)/patche_dirs:/patches" \
+#     tcpdump/defect4c:latest sleep infinity
+# ──────────────────────────────────────────────────────────────────────
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    AM_I_IN_A_DOCKER_CONTAINER=Yes \
+    TZ=UTC \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Toolchain tối thiểu cho tcpdump + helper script Defects4C.
+RUN apt-get update -yq && \
+    apt-get install -yq --no-install-recommends \
+      build-essential make gcc g++ \
+      autoconf automake libtool pkg-config \
+      libpcap-dev zlib1g-dev \
+      git ca-certificates \
+      jq \
+      findutils coreutils grep sed diffutils gawk \
+      util-linux bash \
+      python3 python3-pip \
+      tzdata && \
+    apt-get autoremove -y && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Python deps tối thiểu cho bug_helper_v1_out2.py và build_meta_tcpdump.py
+RUN pip3 install --no-cache-dir jinja2 jmespath
+
+# Mount points khớp với README của project tcpdump:
+#   /src     ← defectsc_tpl (script, projects/*, templates)
+#   /out     ← out_tmp_dirs (clone + logs)
+#   /patches ← patche_dirs (apr patches)
+WORKDIR /src
+
+# Không có entrypoint phức tạp (redis, sshd, cron...) vì workflow tcpdump
+# chỉ cần chạy `python3` và `bash`. Dùng `sleep infinity` để container chạy
+# nền, rồi `docker exec` vào chạy lệnh.
+CMD ["bash"]

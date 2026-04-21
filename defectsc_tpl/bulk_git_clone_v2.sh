@@ -75,13 +75,21 @@ if [[ "$mode" != "mini" && "$mode" != "full" ]]; then
 fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-git_setup_script="${script_dir}/../out_tmp_dirs/git_setup.sh"
+# Host layout: defects4c/defectsc_tpl/../out_tmp_dirs/git_setup.sh
+# Docker (tcpdump README): -v .../out_tmp_dirs:/out  →  /out/git_setup.sh
+git_setup_script=""
+for candidate in "${script_dir}/../out_tmp_dirs/git_setup.sh" "/out/git_setup.sh"; do
+    if [[ -f "${candidate}" ]]; then
+        git_setup_script="$(cd "$(dirname "${candidate}")" && pwd)/$(basename "${candidate}")"
+        break
+    fi
+done
 
 debug "script_dir: ${script_dir}"
 debug "git_setup_script: ${git_setup_script}"
 
-if [[ ! -f "${git_setup_script}" ]]; then
-    error "git_setup.sh not found: ${git_setup_script}"
+if [[ -z "${git_setup_script}" ]]; then
+    error "git_setup.sh not found (tried ${script_dir}/../out_tmp_dirs/git_setup.sh and /out/git_setup.sh)"
     exit 1
 fi
 

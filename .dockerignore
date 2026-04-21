@@ -1,0 +1,22 @@
+.git
+.github
+__pycache__
+*.pyc
+.DS_Store
+
+# Large/generated data. These are mounted as volumes at runtime.
+out_tmp_dirs
+patche_dirs
+unified_debugging
+LLM_Defects4C
+
+# Local docs/assets are not needed by Docker builds.
+*.pdf
+assets
+
+# Keep source templates and scripts available when building from repo root.
+!Dockerfile
+!defectsc_tpl
+!tcpdump_script
+!out_tmp_dirs/.gitkeep
+!patche_dirs/.gitkeep
