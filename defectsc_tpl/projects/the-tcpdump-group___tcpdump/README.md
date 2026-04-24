@@ -1,11 +1,5 @@
 # `the-tcpdump-group___tcpdump` — Defects4C × Unified-Debugging
 
-Thư mục này là **bộ mô tả project tcpdump** cho framework Defects4C và đồng thời
-chứa pipeline sinh **metadata chuẩn Unified-Debugging** (`{bug_id}_meta.json`)
-phục vụ cho Fault Localization (FL) và Automated Program Repair (APR).
-
----
-
 ## 1. Kiến trúc & ngữ cảnh
 
 ```
@@ -45,7 +39,7 @@ reproduce bug.
 | `project.json` | Khai báo project: homepage, repo, template build/test, flags. |
 | `build_tpl.jinja` | Jinja template dùng bởi Defects4C container để sinh `inplace_build.sh` / `inplace_rebuild.sh`. |
 | `test_tpl.jinja` | Jinja template dùng để sinh `inplace_test.sh` — bản gốc chạy *cả batch* test với `run_test_testfilter`. |
-| `build_meta_tcpdump.py` | **Script chính**: compile + chạy **từng** test case độc lập, thu coverage gcov, rồi ghi `{bug_id}_meta.json` cho Unified-Debugging. |
+| `build_meta_tcpdump.py` | **Script chính**: compile + chạy **từng** test case độc lập, thu coverage gcov, rồi ghi `{bug_id}_meta.json` cho Unified-Debugging. Metadata giữ nguyên toàn bộ test như raw. |
 
 Các file template (`*.jinja`) phục vụ cho luồng Defects4C gốc (chạy qua Docker
 `base/defect4c`). Script `build_meta_tcpdump.py` chạy **độc lập**, không phụ
@@ -66,41 +60,51 @@ Với mỗi bug trong `bugs_list_new.json`:
    `git checkout commit_before`. Đây là trạng thái **chưa có** bản vá — bug
    còn nguyên.
 
-3. **Khôi phục test asset** — các file `tests/TESTLIST`, `tests/*.pcap`,
-   `tests/*.out` thuộc `files.test` thường được **thêm mới trong commit_after**
-   (cùng lúc với bản vá). Script dùng `git show <sha_after>:<path>` để lấy các
-   asset đó về cây buggy → test regression mới có chỗ để chạy.
+3. **Giữ nguyên bộ test của buggy version** — script dùng trực tiếp
+   `tests/TESTLIST` và các asset test đang có sau khi checkout `commit_before`.
+   Không copy `TESTLIST`, `*.pcap`, `*.out` từ `commit_after`.
 
-4. **Compile với gcov** — configure + make với:
-   ```
-   CFLAGS  = -g -O0 -fprofile-arcs -ftest-coverage
-   LDFLAGS = -fprofile-arcs -ftest-coverage
-   ```
-   Tạo file `.gcno` đi kèm mỗi object. Nếu thiếu `./configure` mà có
-   `configure.ac`, script tự chạy `autoreconf -fi`.
+4. **Build buggy tree để materialize TESTLIST và helper**
+   * Checkout `commit_before`, rồi configure + make.
+   * Nếu thiếu `./configure` mà có `configure.ac`, script tự chạy
+     `autoreconf -fi`.
+   * Script sinh `run_one_test.sh` để APR có thể gọi lại đúng 1 test.
 
-5. **Chạy từng test case độc lập**
+5. **Parse test list**
    * Parse `tests/TESTLIST` → danh sách `(name, input.pcap, expected.out, opts)`.
-   * Chọn **tất cả regression test** khớp `*.pcap` của bug, cộng tối đa
-     `--max-pass` test khác (default 50) để làm phổ coverage.
+   * Với config mặc định hiện tại (`--max-pass -1`), script giữ toàn bộ
+     `TESTLIST` của buggy version để chạy.
+   * Nếu bạn tự truyền `--max-pass`, script có thể giới hạn số test PASS ngoài
+     regression subset.
+
+6. **Phase A: thu outcome**
+   * Chạy buggy version trên từng test như hiện tại và lưu `outcome`,
+     `actual_output`, `expected_output`, `fail_reason`.
+   * Nếu bật `--dual-run`, script checkout tiếp fixed version
+     (`commit_after`), nhưng vẫn chạy lại đúng bộ test lấy từ buggy version
+     để lấy `outcome_fixed`.
+
+7. **Phase B: thu coverage của buggy version**
+   * Checkout lại buggy version, build non-ASAN + gcov:
+     ```
+     CFLAGS  = -g -O0 -fprofile-arcs -ftest-coverage
+     LDFLAGS = -fprofile-arcs -ftest-coverage
+     ```
    * Trước mỗi test: `find . -name '*.gcda' -delete` (reset coverage).
    * Chạy `./TESTonce <name> <input> <output> "<opts>"` trong `tests/`.
-   * Pass/Fail = `exit 0 && "TEST FAILED" ∉ output`. Nếu fail, đọc
-     `<name>.diff` làm `actual_output`.
-
-6. **Thu thập coverage (gcov)**
    * Với mỗi `*.gcda` vừa sinh, chạy `gcov -b -c` rồi parse các dòng
      `function NAME called N returned M`. Lấy các hàm có `N > 0`.
    * Kết quả lưu dạng `covered_functions: ["print-isakmp.c:isakmp_print", …]`
      — đúng format mà `Defects4CLoader._requalify_tests` kỳ vọng.
 
-7. **Ghi metadata & helper**
+8. **Ghi metadata & helper**
    * Sinh `run_one_test.sh` trong cây build (lọc đúng 1 entry từ TESTLIST rồi
      gọi `TESTonce`) — để APR có thể validate patch bằng cách gọi
      `bash run_one_test.sh <test_id>`.
-   * Xuất `<project>__<sha>_meta.json` vào
-     `defects4c/unified_debugging/tcpdump/metadata/` (đường dẫn mặc định khớp
-     với hằng `DEFECTS4C_TCPDUMP_METADATA_DIR`).
+   * `bug_id` lấy từ `type.id` trong `bugs_list_new.json`.
+   * Tên file output là `{safe_bug_id}_meta.json`; nếu `type.id` bị trùng giữa
+     nhiều bug thì script tự thêm suffix `__<sha_after[:12]>` để tránh ghi đè.
+   * Ghi cùng nội dung vào cả `raw/` và `metadata/`.
 
 ### 3.1 Ground-truth function (best-effort)
 
@@ -133,21 +137,56 @@ Trên **macOS** không có `libpcap-dev` bản GNU và `gcov` của clang khác 
 → **nên chạy trong container Defects4C** (`my_defects4c_tcpdump`) thay vì chạy
 trực tiếp trên host darwin.
 
-### 5.3 Docker (khuyên dùng trên macOS)
+### 5.3 Docker + Run Flow (khuyên dùng trên macOS)
 
-#### 5.3.1 Build image slim (1 lần duy nhất)
+1. cấu hình đường dẫn / tham số;
+2. build hoặc start lại Docker;
+3. optional: xóa cache/output cũ;
+4. chạy `build_meta_tcpdump.py`.
+
+#### 5.3.1 Config cần thống nhất trước khi chạy
+
+Chạy từ thư mục:
 
 ```bash
 cd "/Users/linhnh/Documents/Fault Localization/defects4c"
-docker build -f Dockerfile.tcpdump -t tcpdump/defect4c:latest .
 ```
 
-#### 5.3.2 Chạy container
+Các đường dẫn mount / output được dùng xuyên suốt:
+
+| Biến / đường dẫn | Ý nghĩa |
+|---|---|
+| `$(pwd)/defectsc_tpl:/src` | source của Defects4C template trong container |
+| `$(pwd)/out_tmp_dirs:/out` | nơi chứa repo đã clone, log build/test |
+| `$(pwd)/unified_debugging:/unified_debugging` | nơi ghi `metadata/` và `raw/` |
+| `$(pwd)/../Unified-Debugging:/udbg` | mount code Unified-Debugging để đối chiếu/debug |
+| `--metadata-dir /out/unified_debugging/tcpdump/metadata` | output metadata trong container; trên host tương ứng là `defects4c/out_tmp_dirs/unified_debugging/tcpdump/metadata` |
+| `--raw-dir /out/unified_debugging/tcpdump/raw` | output raw trong container; trên host tương ứng là `defects4c/out_tmp_dirs/unified_debugging/tcpdump/raw` |
+
+Config chạy khuyến nghị cho script:
+
+| Option | Khuyến nghị | Ý nghĩa |
+|---|---|---|
+| `--dual-run` | bật | phase A chạy buggy + fixed trên cùng bộ test buggy để lấy `outcome` và `outcome_fixed`; phase B lấy coverage của buggy |
+| `--gcov-scope all` | bật | thu coverage cho toàn bộ tập test đã chọn |
+| `--skip-if-exists` | bật khi chạy nhiều bug | resume nếu đã có output |
+| `--sha <commit_after>` | optional | chỉ chạy 1 bug theo `commit_after` để test pipeline |
+
+> **Quan trọng:** mount `unified_debugging:/unified_debugging` là bắt buộc. Nếu
+> thiếu mount này, file `*_meta.json` sẽ chỉ nằm trong container.
+
+#### 5.3.2 Bước 1: chuẩn bị Docker
+
+**Trường hợp A: chạy lần đầu**
 
 ```bash
 cd "/Users/linhnh/Documents/Fault Localization/defects4c"
+mkdir -p unified_debugging
 
-mkdir -p unified_debugging   # nơi lưu metadata {bug_id}_meta.json
+# Build image: chỉ cần làm 1 lần đầu hoặc khi sửa Dockerfile.tcpdump
+docker build -f Dockerfile.tcpdump -t tcpdump/defect4c:latest .
+
+# Tạo container chạy nền
 docker rm -f my_defects4c_tcpdump 2>/dev/null || true
 docker run -d --name my_defects4c_tcpdump \
   --ipc=host \
@@ -157,52 +196,41 @@ docker run -d --name my_defects4c_tcpdump \
   -v "$(pwd)/unified_debugging:/unified_debugging" \
   -v "$(pwd)/../Unified-Debugging:/udbg" \
   tcpdump/defect4c:latest sleep infinity
+
+# Clone dữ liệu commit của tcpdump (chỉ cần làm khi out_tmp_dirs chưa có)
+docker exec my_defects4c_tcpdump bash -lc \
+  'cd /src && bash bulk_git_clone_v2.sh mini the-tcpdump-group___tcpdump'
 ```
 
-> **Quan trọng:** mount `unified_debugging:/unified_debugging` là **bắt buộc** —
-> đó là nơi `build_meta_tcpdump.py` ghi file `*_meta.json`. Không mount thì
-> metadata sẽ kẹt trong container và mất khi container bị xóa.
+**Trường hợp B: chạy các lần sau**
 
+Nếu image và container đã tồn tại, chỉ cần khởi động lại container:
 
----
+```bash
+cd "/Users/linhnh/Documents/Fault Localization/defects4c"
+docker start my_defects4c_tcpdump
+```
 
-## 6. Cách chạy `build_meta_tcpdump.py`
+Nếu container đã bị xóa, quay lại **Trường hợp A**.
 
-Đường dẫn trong container: script nằm ở
-`/src/projects/the-tcpdump-group___tcpdump/build_meta_tcpdump.py`.
-
-### 6.1. Build
+#### 5.3.3 Bước 2: optional xóa cache / output cũ
 
 ```bash
 cd "/Users/linhnh/Documents/Fault Localization/defects4c"
 
-# (a) Xoá container cũ (giữ nguyên image nếu đã build trước đó)
-docker rm -f my_defects4c_tcpdump my_defects4c 2>/dev/null || true
+rm -rf "out_tmp_dirs/unified_debugging/tcpdump/metadata"
+rm -rf "out_tmp_dirs/unified_debugging/tcpdump/raw"
+rm -rf "out_tmp_dirs/the-tcpdump-group___tcpdump/logs"
+```
 
-# (b) Xoá dữ liệu cũ của tcpdump (clone, logs, metadata, patches)
-rm -rf "out_tmp_dirs/the-tcpdump-group___tcpdump"
-rm -rf "patche_dirs/the-tcpdump-group___tcpdump"
-rm -rf "unified_debugging/tcpdump/metadata"
-mkdir -p "unified_debugging"
+#### 5.3.4 Bước 3: chạy `build_meta_tcpdump.py`
 
-# (c) Build image slim (chỉ cần làm 1 lần, hoặc khi sửa Dockerfile.tcpdump)
-docker build -f Dockerfile.tcpdump -t tcpdump/defect4c:latest .
+Đường dẫn script trong container:
+`/src/projects/the-tcpdump-group___tcpdump/build_meta_tcpdump.py`
 
-# (d) Khởi container mới (nền) — LƯU Ý: mount thêm unified_debugging
-docker run -d --name my_defects4c_tcpdump \
-  --ipc=host \
-  -v "$(pwd)/defectsc_tpl:/src" \
-  -v "$(pwd)/out_tmp_dirs:/out" \
-  -v "$(pwd)/patche_dirs:/patches" \
-  -v "$(pwd)/unified_debugging:/unified_debugging" \
-  -v "$(pwd)/../Unified-Debugging:/udbg" \
-  tcpdump/defect4c:latest sleep infinity
+**Chạy thử 1 bug**
 
-# (e) Clone dữ liệu các commit của tcpdump
-docker exec my_defects4c_tcpdump bash -lc \
-  'cd /src && bash bulk_git_clone_v2.sh mini the-tcpdump-group___tcpdump'
-
-# (f) Thử 1 bug để xác nhận pipeline OK
+```bash
 docker exec my_defects4c_tcpdump bash -lc '
   cd /src/projects/the-tcpdump-group___tcpdump && \
   python3 build_meta_tcpdump.py \
@@ -212,8 +240,11 @@ docker exec my_defects4c_tcpdump bash -lc '
     --dual-run \
     --gcov-scope all
 '
+```
 
-# (g) Nếu OK, chạy toàn bộ (resume được nếu bị ngắt)
+**Chạy toàn bộ, có resume**
+
+```bash
 docker exec my_defects4c_tcpdump bash -lc '
   cd /src/projects/the-tcpdump-group___tcpdump && \
   python3 build_meta_tcpdump.py \
@@ -225,20 +256,18 @@ docker exec my_defects4c_tcpdump bash -lc '
 '
 ```
 
-### 6.2. Chạy
-
-**Chạy trong container slim**
-```bash
-docker exec my_defects4c_tcpdump bash -lc \
-  'cd /src/projects/the-tcpdump-group___tcpdump && python3 build_meta_tcpdump.py --skip-if-exists'
-```
-
-**Chạy thử 1 bug**
-```bash
-docker exec my_defects4c_tcpdump bash -lc \
-  'cd /src/projects/the-tcpdump-group___tcpdump && \
-   python3 build_meta_tcpdump.py --sha f76e7feb41a4327d2b0978449bbdafe98d4a3771 --max-pass 20'
-```
+> Nếu thấy lỗi `Đang có process khác chạy (lock: /tmp/.build_meta_tcpdump....lock)`,
+> nghĩa là đã có một run khác đang chạy thật. Kiểm tra bằng:
+>
+> ```bash
+> docker exec my_defects4c_tcpdump bash -lc 'pgrep -af build_meta_tcpdump.py'
+> ```
+>
+> Nếu cần dừng run cũ rồi chạy lại:
+>
+> ```bash
+> docker exec my_defects4c_tcpdump bash -lc 'kill <pid>'
+> ```
 
 ---
 
@@ -246,17 +275,18 @@ docker exec my_defects4c_tcpdump bash -lc \
 
 | Unified-Debugging yêu cầu | Cách script đáp ứng |
 |---|---|
-| `bug_id` | `the-tcpdump-group___tcpdump@<commit_after>` |
+| `bug_id` | `type.id` trong `bugs_list_new.json` |
 | `dataset_name` | `"defects4c"` |
 | `language` | `"C"` |
 | `source_file` | `<git_repo_dir_<sha>>/<files.src[0]>` (absolute) |
 | `compile_cmd` | `cd <repo> && CFLAGS=... LDFLAGS=... ./configure --prefix=<repo> && make -jN` |
 | `test_cmd_template` | `bash <repo>/run_one_test.sh {test_id}` |
 | `tests[*].test_id` | Field 1 của dòng TESTLIST |
-| `tests[*].outcome` | `PASS/FAIL` theo TESTonce + `TEST FAILED` grep |
+| `tests[*].outcome` | `PASS/FAIL` của buggy version trong phase A |
+| `tests[*].outcome_fixed` | `PASS/FAIL` của fixed version (`commit_after`) khi chạy cùng bộ test lấy từ buggy |
 | `tests[*].actual_output` | Content của `<test>.diff` (hoặc stdout/stderr tail) nếu fail |
 | `tests[*].expected_output` | Nội dung file `<test>.out` nếu fail |
-| `tests[*].covered_functions` | Parse `gcov -b -c` → `"<file.c>:<func>"` |
+| `tests[*].covered_functions` | Coverage của buggy version trong phase B: parse `gcov -b -c` → `"<file.c>:<func>"` |
 | `ground_truth_functions` | Parse hunk header của `git diff` |
 
 Cầu nối validate patch nằm ở `Defects4CAdapter` trong

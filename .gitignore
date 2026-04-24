@@ -162,5 +162,6 @@ cython_debug/
 #.idea/
 
 # New
-# out_tmp_dirs/
+out_tmp_dirs/
+out_tmp_dirs.zip
 .DS_Store

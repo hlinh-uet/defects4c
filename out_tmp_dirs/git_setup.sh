@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -u
+set -eu
 set -o pipefail
 
 error() {
@@ -8,6 +8,13 @@ error() {
 }
 
 trap 'error "git_setup.sh failed for project=${project_name:-unknown} at line $LINENO: $BASH_COMMAND"' ERR
+
+# In the slim container, Git may fail while reading default config locations.
+# Force a clean config source so repository bootstrap on /out is deterministic.
+export HOME=/tmp
+export XDG_CONFIG_HOME=/tmp
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_CONFIG_GLOBAL=/dev/null
 
 # Simplified git repository setup with selective commit fetching
 # Usage: ./git_setup.sh <project_name> <commit1> <commit2> [commit3] ...
@@ -58,6 +65,10 @@ cd "$target_dir" || {
 echo "Initializing git repository..."
 if [[ ! -d .git ]]; then
     git init
+    [[ -d .git ]] || {
+        echo "ERROR: git init did not create .git in $target_dir"
+        exit 1
+    }
 fi
 
 echo "Adding remote origin: $github_url"
@@ -105,4 +116,3 @@ if ! timeout 1200 git submodule update --init --recursive --jobs 1; then
 fi
 
 echo "Submodule update finished successfully"
-

@@ -9,21 +9,17 @@ thuộc project ``the-tcpdump-group___tcpdump`` trong framework Defects4C.
 Với mỗi bug trong ``bugs_list_new.json``, script làm:
 
     1. Xác định cây mã nguồn buggy (checkout ``commit_before``).
-    2. Khôi phục các test asset được thêm ở ``commit_after``
-       (``tests/TESTLIST``, ``*.pcap``, ``*.out`` của regression test).
+    2. Dùng trực tiếp bộ test hiện có trong cây buggy
+       (``tests/TESTLIST`` và các asset ở ``commit_before``).
     3. Cấu hình + biên dịch tcpdump với cờ coverage (gcov/gcno).
-    4. Parse ``tests/TESTLIST`` và chạy ``./TESTonce`` cho **từng** test case
+    4. Parse ``tests/TESTLIST`` của buggy version và chạy ``./TESTonce`` cho **từng** test case
        (mặc định chạy toàn bộ TESTLIST). Trước mỗi test xoá sạch ``*.gcda``
        để lấy coverage riêng cho test đó.
     5. Phân tích output ``gcov`` → ``covered_functions`` dạng
        ``<file.c>:<func>`` mà FL của Unified-Debugging kỳ vọng.
     6. Ghi ``{safe_bug_id}_meta.json`` vào 2 chỗ:
          * ``raw/`` — kết quả thô, giữ nguyên outcome chạy trên buggy.
-         * ``metadata/`` — kết quả đã lọc: những test ``FAIL`` không nằm
-           trong danh sách test liên quan (xác định theo trường
-           ``files.test`` của ``bugs_list_new.json``, bỏ ``tests/TESTLIST``)
-           sẽ **bị loại bỏ hoàn toàn** khỏi mảng ``tests``. Test PASS luôn
-           được giữ lại để coverage cho FL không bị mất.
+         * ``metadata/`` — cùng nội dung với ``raw/`` để Unified-Debugging dùng.
     7. Sinh ``run_one_test.sh`` trong build tree để ``test_cmd_template``
        có thể chạy lại đúng 1 test khi APR validate patch.
 
@@ -37,7 +33,9 @@ Ghi chú:
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -92,6 +90,12 @@ def _acquire_single_run_lock(lock_path: Path):
     return fp
 
 
+def _lock_path_for_metadata_dir(metadata_dir: Path) -> Path:
+    """Đặt lock ở ``/tmp`` để tránh lỗi permission trên mount ``/out``."""
+    key = hashlib.md5(str(metadata_dir).encode("utf-8")).hexdigest()
+    return Path("/tmp") / f".build_meta_tcpdump.{key}.lock"
+
+
 def _detect_default_out_root() -> Path:
     """Default cho ``--out-root``.
 
@@ -108,7 +112,7 @@ def _detect_default_out_root() -> Path:
 
 
 def _detect_default_metadata_dir() -> Path:
-    """Default cho ``--metadata-dir`` (kết quả đã lọc fail không liên quan)."""
+    """Default cho ``--metadata-dir``."""
     host_default = DEFECTS4C_ROOT / "unified_debugging" / "tcpdump" / "metadata"
     if _safe_exists(host_default.parent.parent):
         return host_default
@@ -121,7 +125,7 @@ def _detect_default_metadata_dir() -> Path:
 
 
 def _detect_default_raw_dir() -> Path:
-    """Default cho ``--raw-dir`` (kết quả gốc chưa lọc)."""
+    """Default cho ``--raw-dir``."""
     host_default = DEFECTS4C_ROOT / "unified_debugging" / "tcpdump" / "raw"
     if _safe_exists(host_default.parent.parent):
         return host_default
@@ -165,35 +169,18 @@ class BugEntry:
     src_files: List[str]
     test_files: List[str]
     cve_name: Optional[str]
+    type_id: str
     raw: dict
+    output_bug_id: str = ""
 
     @property
     def bug_id(self) -> str:
-        return f"{PROJECT_NAME}@{self.sha_after}"
+        return self.type_id or f"{PROJECT_NAME}@{self.sha_after}"
 
     @property
     def safe_bug_id(self) -> str:
-        return self.bug_id.replace("@", "__").replace("/", "__")
-
-    @property
-    def pcap_basenames(self) -> List[str]:
-        return [os.path.basename(p) for p in self.test_files if p.endswith(".pcap")]
-
-    @property
-    def related_test_asset_basenames(self) -> List[str]:
-        """Tất cả test asset của bug (trừ ``tests/TESTLIST``), dạng basename.
-
-        Dùng để xác định test case nào thuộc bug: TESTLIST entry có
-        ``input_file`` hoặc ``expected_file`` match một trong các basename này.
-        """
-        result = []
-        for p in self.test_files:
-            base = os.path.basename(p)
-            if not base or base == "TESTLIST":
-                continue
-            result.append(base)
-        return result
-
+        base = self.output_bug_id or self.bug_id
+        return base.replace("@", "__").replace("/", "__")
 
 @dataclass
 class TestEntry:
@@ -212,54 +199,11 @@ class TestEntry:
 class TestResult:
     test_id: str
     outcome: str                      # "PASS" | "FAIL"
+    outcome_fixed: str = ""
     fail_reason: str = ""
     actual_output: str = ""
     expected_output: str = ""
     covered_functions: List[str] = field(default_factory=list)
-
-
-def _compute_related_test_ids(
-    bug: BugEntry,
-    selected: List[TestEntry],
-) -> set:
-    """
-    Test được coi là liên quan tới bug nếu ``input_file`` hoặc ``expected_file``
-    của nó (kể cả basename) khớp với một trong ``bug.test_files`` (đã bỏ
-    ``tests/TESTLIST``).
-    """
-    related_bases = set(bug.related_test_asset_basenames)
-    related: set = set()
-    for te in selected:
-        candidates = {
-            te.input_file,
-            os.path.basename(te.input_file),
-            te.expected_file,
-            os.path.basename(te.expected_file),
-        }
-        if candidates & related_bases:
-            related.add(te.test_id)
-    return related
-
-
-def _filter_results_drop_unrelated_fail(
-    results: List[TestResult],
-    related_test_ids: set,
-) -> Tuple[List[TestResult], List[str]]:
-    """
-    Loại bỏ hoàn toàn test ``FAIL`` mà không nằm trong ``related_test_ids``.
-    Các test PASS được giữ nguyên (kể cả khi không liên quan) để coverage
-    cho FL không bị mất.
-
-    Returns: ``(filtered_results, dropped_fail_ids)``.
-    """
-    filtered: List[TestResult] = []
-    dropped: List[str] = []
-    for r in results:
-        if r.outcome == "FAIL" and r.test_id not in related_test_ids:
-            dropped.append(r.test_id)
-            continue
-        filtered.append(r)
-    return filtered, dropped
 
 
 # ---------------------------------------------------------------------------
@@ -299,23 +243,6 @@ def run(cmd, *, cwd=None, env=None, check=False, timeout=None, capture=True):
     return rc, out, err
 
 
-def run_bytes(cmd, *, cwd=None, env=None, timeout=None):
-    """Chạy shell command, trả stdout dạng **bytes** (an toàn cho binary)."""
-    args = shlex.split(cmd) if isinstance(cmd, str) else list(cmd)
-    try:
-        proc = subprocess.run(
-            args,
-            cwd=str(cwd) if cwd else None,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as exp:
-        return 124, b"", f"TimeoutExpired: {exp}".encode()
-    return proc.returncode, proc.stdout or b"", proc.stderr or b""
-
-
 def which(bin_name: str) -> Optional[str]:
     return shutil.which(bin_name)
 
@@ -339,7 +266,9 @@ def load_bugs() -> List[BugEntry]:
         files = raw.get("files", {}) or {}
         src_files = files.get("src", []) or []
         test_files = files.get("test", []) or []
-        cve = (raw.get("type") or {}).get("name")
+        type_info = raw.get("type") or {}
+        cve = type_info.get("name")
+        type_id = type_info.get("id") or sha_after
         if not sha_after:
             continue
         bugs.append(BugEntry(
@@ -348,8 +277,15 @@ def load_bugs() -> List[BugEntry]:
             src_files=src_files,
             test_files=test_files,
             cve_name=cve,
+            type_id=type_id,
             raw=raw,
         ))
+    counts = Counter(b.bug_id for b in bugs)
+    for bug in bugs:
+        if counts[bug.bug_id] > 1:
+            bug.output_bug_id = f"{bug.bug_id}__{bug.sha_after[:12]}"
+        else:
+            bug.output_bug_id = bug.bug_id
     return bugs
 
 
@@ -401,31 +337,21 @@ def checkout_buggy(repo_dir: Path, bug: BugEntry) -> None:
     _git_checkout(repo_dir, target_sha, "buggy")
 
 
-def restore_regression_test_assets(repo_dir: Path, bug: BugEntry) -> None:
-    """Khôi phục ``files.test`` từ ``commit_after`` vào working tree.
+def checkout_fixed(repo_dir: Path, bug: BugEntry) -> None:
+    """Checkout về ``commit_after`` để chạy test trên bản fixed."""
+    _git_checkout(repo_dir, bug.sha_after, "fixed")
 
-    Asset test (``TESTLIST``, ``*.pcap``, ``*.out``, …) thường chỉ có ở
-    ``commit_after``. Khi checkout về ``commit_before`` để reproduce bug ta
-    cần lôi chúng vào để ``TESTonce`` chạy được.
 
-    Đọc **bytes** để an toàn với file binary (pcap).
-    """
+def existing_buggy_test_asset_basenames(repo_dir: Path, bug: BugEntry) -> List[str]:
+    """Các asset trong ``files.test`` nhưng thực sự tồn tại ở checkout buggy."""
+    bases: List[str] = []
     for rel in bug.test_files:
-        target = repo_dir / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        rc, data, err = run_bytes(
-            ["git", "show", f"{bug.sha_after}:{rel}"],
-            cwd=repo_dir,
-        )
-        if rc != 0:
-            log(f"  [warn] không show được {rel}@{bug.sha_after[:10]} "
-                f"(có thể chưa tồn tại ở commit_after): {err[:200]!r}")
+        base = os.path.basename(rel)
+        if not base or base == "TESTLIST":
             continue
-        try:
-            with open(target, "wb") as f:
-                f.write(data)
-        except OSError as exc:
-            log(f"  [warn] ghi test asset thất bại {target}: {exc}")
+        if (repo_dir / rel).exists():
+            bases.append(base)
+    return sorted(set(bases))
 
 
 # ---------------------------------------------------------------------------
@@ -514,12 +440,21 @@ def parse_testlist(tests_dir: Path) -> List[TestEntry]:
     return entries
 
 
-def select_tests(all_tests: List[TestEntry], bug: BugEntry, max_pass: int) -> List[TestEntry]:
-    """Giữ regression test (match pcap của bug) + bổ sung ``max_pass`` entries khác.
+def select_tests(
+    all_tests: List[TestEntry],
+    bug: BugEntry,
+    max_pass: int,
+    *,
+    buggy_pcap_basenames: Optional[set] = None,
+) -> List[TestEntry]:
+    """Giữ regression test của buggy tree + bổ sung ``max_pass`` entries khác.
 
-    ``max_pass=-1`` hoặc ``>= len(others)`` => lấy toàn bộ TESTLIST.
+    Nếu không xác định được regression pcap trong checkout buggy, chạy toàn bộ
+    ``TESTLIST`` hiện có để không phụ thuộc vào asset từ ``commit_after``.
     """
-    pcap_names = set(bug.pcap_basenames)
+    pcap_names = set(buggy_pcap_basenames or [])
+    if not pcap_names:
+        return list(all_tests)
     regression, others = [], []
     for t in all_tests:
         if t.input_file in pcap_names or os.path.basename(t.input_file) in pcap_names:
@@ -777,7 +712,6 @@ def process_bug(
     skip_if_exists: bool,
     clone_if_missing: bool,
     skip_coverage: bool,
-    skip_filter: bool = False,
     asan: bool = False,
     dual_run: bool = False,
     gcov_scope: str = "fail+regression",
@@ -797,12 +731,11 @@ def process_bug(
         log(f"  [error] không tìm/clone được repo: {exc}")
         return None
 
-    # Chuẩn bị test selection (dùng chung cho cả 1-phase và 2-phase).
+    # Chuẩn bị repo buggy (dùng chung cho cả 1-phase và 2-phase).
     try:
         checkout_buggy(repo_dir, bug)
-        restore_regression_test_assets(repo_dir, bug)
     except Exception as exc:
-        log(f"  [error] checkout/restore lỗi: {exc}")
+        log(f"  [error] checkout buggy lỗi: {exc}")
         return None
 
     # Cần build 1 lần để có TESTLIST đầy đủ và helper script.
@@ -821,10 +754,21 @@ def process_bug(
     test_cmd_template = f"bash {shlex.quote(str(repo_dir / 'run_one_test.sh'))} {{test_id}}"
     tests_dir = repo_dir / "tests"
     all_entries = parse_testlist(tests_dir)
-    selected = select_tests(all_entries, bug, max_pass=max_pass)
+    buggy_test_assets = existing_buggy_test_asset_basenames(repo_dir, bug)
+    buggy_pcap_basenames = {name for name in buggy_test_assets if name.endswith(".pcap")}
+    if buggy_test_assets:
+        log(f"  [tests] asset từ metadata có sẵn trong buggy tree: {len(buggy_test_assets)}")
+    else:
+        log("  [tests] không thấy asset nào từ files.test trong buggy tree; dùng toàn bộ TESTLIST buggy.")
+    selected = select_tests(
+        all_entries,
+        bug,
+        max_pass=max_pass,
+        buggy_pcap_basenames=buggy_pcap_basenames,
+    )
     regression_ids = {
         t.test_id for t in selected
-        if t.input_file in set(bug.pcap_basenames) or os.path.basename(t.input_file) in set(bug.pcap_basenames)
+        if t.input_file in buggy_pcap_basenames or os.path.basename(t.input_file) in buggy_pcap_basenames
     }
     log(f"  [tests] TESTLIST={len(all_entries)}, sẽ chạy={len(selected)} "
         f"(regression={len(regression_ids)})")
@@ -841,16 +785,20 @@ def process_bug(
         f"./configure --prefix={shlex.quote(str(repo_dir))} && make -j{jobs}"
     )
 
-    phase_info: Dict[str, object] = {"mode": "dual" if dual_run else "single"}
+    phase_info: Dict[str, object] = {
+        "mode": "dual" if dual_run else "single",
+        "test_policy": (
+            "buggy_tests_for_buggy_and_fixed" if dual_run else "buggy_tests"
+        ),
+    }
 
     if dual_run:
-        # Phase A: ASAN để lấy outcome/fail_reason chuẩn cho memory bugs.
-        log("  [phaseA] checkout+build ASAN (labels)")
+        # Phase A: chạy buggy trước, sau đó chạy fixed để lấy outcome_fixed.
+        log("  [phaseA-buggy] checkout+build ASAN (labels)")
         try:
             checkout_buggy(repo_dir, bug)
-            restore_regression_test_assets(repo_dir, bug)
         except Exception as exc:
-            log(f"  [error] phaseA checkout/restore lỗi: {exc}")
+            log(f"  [error] phaseA-buggy checkout lỗi: {exc}")
             return None
         if not compile_with_coverage(repo_dir, jobs=jobs, asan=True):
             record = _empty_record(bug, repo_dir, compile_cmd, error="compile_failed_phaseA")
@@ -861,8 +809,35 @@ def process_bug(
             repo_dir, tests_dir, selected,
             test_timeout=test_timeout,
             collect_cov=False,
-            phase_label="phaseA",
+            phase_label="phaseA-buggy",
         )
+
+        fixed_outcome_by_test: Dict[str, str] = {}
+        log("  [phaseA-fixed] checkout+build ASAN (outcome_fixed)")
+        try:
+            checkout_fixed(repo_dir, bug)
+        except Exception as exc:
+            log(f"  [warn] phaseA-fixed checkout lỗi: {exc}")
+            phase_info["phase_a_fixed_status"] = "checkout_failed"
+        else:
+            fixed_tests_dir = repo_dir / "tests"
+            if compile_with_coverage(repo_dir, jobs=jobs, asan=True):
+                results_phase_fixed, _ = _run_tests_with_optional_coverage(
+                    repo_dir, fixed_tests_dir, selected,
+                    test_timeout=test_timeout,
+                    collect_cov=False,
+                    phase_label="phaseA-fixed",
+                )
+                fixed_outcome_by_test = {
+                    r.test_id: r.outcome for r in results_phase_fixed
+                }
+                phase_info["phase_a_fixed_status"] = "ok"
+                phase_info["phase_a_fixed_fail_count"] = sum(
+                    1 for r in results_phase_fixed if r.outcome == "FAIL"
+                )
+            else:
+                log("  [warn] phaseA-fixed build thất bại, outcome_fixed sẽ rỗng.")
+                phase_info["phase_a_fixed_status"] = "compile_failed"
 
         # Chọn tập test cho phase B (gcov).
         fail_ids = {r.test_id for r in results_phase_a if r.outcome == "FAIL"}
@@ -887,9 +862,8 @@ def process_bug(
             log(f"  [phaseB] checkout+build GCOV (scope={gcov_scope}, tests={len(selected_phase_b)})")
             try:
                 checkout_buggy(repo_dir, bug)
-                restore_regression_test_assets(repo_dir, bug)
             except Exception as exc:
-                log(f"  [warn] phaseB checkout/restore lỗi: {exc}")
+                log(f"  [warn] phaseB checkout buggy lỗi: {exc}")
                 selected_phase_b = []
             if selected_phase_b and compile_with_coverage(repo_dir, jobs=jobs, asan=False):
                 results_phase_b, n_cov_b = _run_tests_with_optional_coverage(
@@ -910,6 +884,7 @@ def process_bug(
             results.append(TestResult(
                 test_id=r.test_id,
                 outcome=r.outcome,
+                outcome_fixed=fixed_outcome_by_test.get(r.test_id, ""),
                 fail_reason=r.fail_reason,
                 actual_output=r.actual_output,
                 expected_output=r.expected_output,
@@ -933,26 +908,6 @@ def process_bug(
             phase_label="tests",
         )
         phase_info["single_with_coverage"] = n_with_cov
-
-    # --- Xác định test liên quan theo bugs_list_new.json ---
-    # Test được coi là liên quan khi input/expected file trùng một asset
-    # trong ``bug.test_files`` (đã bỏ ``tests/TESTLIST``).
-    related_test_ids = _compute_related_test_ids(bug, selected)
-    log(f"  [filter] related tests theo bugs_list_new.json: "
-        f"{len(related_test_ids)} ({sorted(related_test_ids)[:10]}"
-        + ("..." if len(related_test_ids) > 10 else "") + ")")
-
-    if skip_filter:
-        filtered_results, dropped_fail_ids = list(results), []
-        log("  [filter] --skip-filter: giữ nguyên metadata = raw.")
-    else:
-        filtered_results, dropped_fail_ids = _filter_results_drop_unrelated_fail(
-            results, related_test_ids,
-        )
-        if dropped_fail_ids:
-            log(f"  [filter] drop {len(dropped_fail_ids)} FAIL không liên quan: "
-                f"{dropped_fail_ids[:10]}"
-                + ("..." if len(dropped_fail_ids) > 10 else ""))
 
     # --- Ghi meta ---
     source_file = str(repo_dir / bug.src_files[0]) if bug.src_files else ""
@@ -984,17 +939,7 @@ def process_bug(
     _write_meta(raw_out_path, raw_record)
     log(f"  [ok] wrote raw {raw_out_path}")
 
-    filtered_record = {
-        **base_record,
-        "tests": [_test_to_dict(r) for r in filtered_results],
-        "filter_info": {
-            "rule": "drop_fail_not_in_bugs_list_test_files",
-            "related_test_ids": sorted(related_test_ids),
-            "dropped_fail_test_ids": dropped_fail_ids,
-            "dropped_fail_count": len(dropped_fail_ids),
-        },
-    }
-    _write_meta(out_path, filtered_record)
+    _write_meta(out_path, raw_record)
     log(f"  [ok] wrote {out_path}")
     return out_path
 
@@ -1003,6 +948,7 @@ def _test_to_dict(r: TestResult) -> dict:
     return {
         "test_id": r.test_id,
         "outcome": r.outcome,
+        "outcome_fixed": r.outcome_fixed,
         "fail_reason": r.fail_reason,
         "actual_output": r.actual_output,
         "expected_output": r.expected_output,
@@ -1092,11 +1038,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument(
         "--metadata-dir", type=Path, default=DEFAULT_METADATA_DIR,
-        help=f"Nơi ghi metadata đã lọc (mặc định: {DEFAULT_METADATA_DIR}).",
+        help=f"Nơi ghi metadata cho Unified-Debugging (mặc định: {DEFAULT_METADATA_DIR}).",
     )
     ap.add_argument(
         "--raw-dir", type=Path, default=DEFAULT_RAW_DIR,
-        help=f"Nơi ghi kết quả thô chưa lọc (mặc định: {DEFAULT_RAW_DIR}).",
+        help=f"Nơi ghi raw output (cùng nội dung với metadata, mặc định: {DEFAULT_RAW_DIR}).",
     )
     ap.add_argument(
         "--jobs", type=int, default=max(os.cpu_count() or 2, 2) - 1,
@@ -1127,10 +1073,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=["all", "fail", "regression", "fail+regression"],
         default="fail+regression",
         help="Khi --dual-run, chọn tập test cho phase GCOV (mặc định: fail+regression).",
-    )
-    ap.add_argument(
-        "--skip-filter", action="store_true",
-        help="Không lọc fail không liên quan (metadata = raw).",
     )
     ap.add_argument(
         "--skip-if-exists", action="store_true",
@@ -1180,7 +1122,7 @@ def main(argv=None) -> int:
     args.metadata_dir.mkdir(parents=True, exist_ok=True)
     args.raw_dir.mkdir(parents=True, exist_ok=True)
 
-    lock_file = args.metadata_dir.parent / ".build_meta_tcpdump.lock"
+    lock_file = _lock_path_for_metadata_dir(args.metadata_dir)
     lock_fp = None
     try:
         lock_fp = _acquire_single_run_lock(lock_file)
@@ -1203,7 +1145,6 @@ def main(argv=None) -> int:
                     skip_if_exists=args.skip_if_exists,
                     clone_if_missing=args.clone,
                     skip_coverage=args.skip_coverage,
-                    skip_filter=args.skip_filter,
                     asan=args.asan,
                     dual_run=args.dual_run,
                     gcov_scope=args.gcov_scope,
