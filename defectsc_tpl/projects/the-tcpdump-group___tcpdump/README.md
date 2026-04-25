@@ -56,36 +56,41 @@ Với mỗi bug trong `bugs_list_new.json`:
    (được clone sẵn bởi `bulk_git_clone_v2.sh`). Nếu thiếu, dùng `--clone` để tự
    clone từ `https://github.com/the-tcpdump-group/tcpdump.git`.
 
-2. **Checkout bản buggy** — `git reset --hard && git clean -fdx`, rồi
-   `git checkout commit_before`. Đây là trạng thái **chưa có** bản vá — bug
-   còn nguyên.
+2. **Checkout bản fixed** — `git reset --hard && git clean -fdx`, rồi
+   `git checkout commit_after`. Đây là cây mã nguồn gốc mà Defects4C mặc định
+   chuẩn bị khi clone repo.
 
-3. **Giữ nguyên bộ test của buggy version** — script dùng trực tiếp
-   `tests/TESTLIST` và các asset test đang có sau khi checkout `commit_before`.
-   Không copy `TESTLIST`, `*.pcap`, `*.out` từ `commit_after`.
+3. **Tạo bản buggy theo kiểu Defects4C gốc** — từ fixed tree ở bước 2, script
+   chỉ checkout riêng `src_file` về `commit_before`. Vì vậy repo buggy là
+   **fixed tree + buggy src overlay**, không phải checkout toàn bộ repo về
+   `commit_before`.
 
-4. **Build buggy tree để materialize TESTLIST và helper**
-   * Checkout `commit_before`, rồi configure + make.
+4. **Dùng bộ test của fixed tree**
+   * `tests/TESTLIST`, `*.pcap`, `*.out` và các helper test vẫn đến từ
+     `commit_after`, đúng như workflow mặc định của Defects4C.
+
+5. **Build current tree để materialize TESTLIST và helper**
+   * Checkout buggy overlay rồi configure + make.
    * Nếu thiếu `./configure` mà có `configure.ac`, script tự chạy
      `autoreconf -fi`.
    * Script sinh `run_one_test.sh` để APR có thể gọi lại đúng 1 test.
 
-5. **Parse test list**
+6. **Parse test list**
    * Parse `tests/TESTLIST` → danh sách `(name, input.pcap, expected.out, opts)`.
    * Với config mặc định hiện tại (`--max-pass -1`), script giữ toàn bộ
-     `TESTLIST` của buggy version để chạy.
+     `TESTLIST` của fixed/current tree để chạy.
    * Nếu bạn tự truyền `--max-pass`, script có thể giới hạn số test PASS ngoài
      regression subset.
 
-6. **Phase A: thu outcome**
+7. **Phase A: thu outcome**
    * Chạy buggy version trên từng test như hiện tại và lưu `outcome`,
      `actual_output`, `expected_output`, `fail_reason`.
    * Nếu bật `--dual-run`, script checkout tiếp fixed version
-     (`commit_after`), nhưng vẫn chạy lại đúng bộ test lấy từ buggy version
+     (`commit_after`), nhưng vẫn chạy lại đúng bộ test lấy từ fixed/current tree
      để lấy `outcome_fixed`.
 
-7. **Phase B: thu coverage của buggy version**
-   * Checkout lại buggy version, build non-ASAN + gcov:
+8. **Phase B: thu coverage của buggy version**
+   * Checkout lại buggy overlay, build non-ASAN + gcov:
      ```
      CFLAGS  = -g -O0 -fprofile-arcs -ftest-coverage
      LDFLAGS = -fprofile-arcs -ftest-coverage
@@ -167,7 +172,7 @@ Config chạy khuyến nghị cho script:
 
 | Option | Khuyến nghị | Ý nghĩa |
 |---|---|---|
-| `--dual-run` | bật | phase A chạy buggy + fixed trên cùng bộ test buggy để lấy `outcome` và `outcome_fixed`; phase B lấy coverage của buggy |
+| `--dual-run` | bật | phase A chạy buggy + fixed trên cùng bộ test của fixed/current tree để lấy `outcome` và `outcome_fixed`; phase B lấy coverage của buggy |
 | `--gcov-scope all` | bật | thu coverage cho toàn bộ tập test đã chọn |
 | `--skip-if-exists` | bật khi chạy nhiều bug | resume nếu đã có output |
 | `--sha <commit_after>` | optional | chỉ chạy 1 bug theo `commit_after` để test pipeline |
@@ -283,7 +288,7 @@ docker exec my_defects4c_tcpdump bash -lc '
 | `test_cmd_template` | `bash <repo>/run_one_test.sh {test_id}` |
 | `tests[*].test_id` | Field 1 của dòng TESTLIST |
 | `tests[*].outcome` | `PASS/FAIL` của buggy version trong phase A |
-| `tests[*].outcome_fixed` | `PASS/FAIL` của fixed version (`commit_after`) khi chạy cùng bộ test lấy từ buggy |
+| `tests[*].outcome_fixed` | `PASS/FAIL` của fixed version (`commit_after`) khi chạy cùng bộ test lấy từ fixed/current tree |
 | `tests[*].actual_output` | Content của `<test>.diff` (hoặc stdout/stderr tail) nếu fail |
 | `tests[*].expected_output` | Nội dung file `<test>.out` nếu fail |
 | `tests[*].covered_functions` | Coverage của buggy version trong phase B: parse `gcov -b -c` → `"<file.c>:<func>"` |

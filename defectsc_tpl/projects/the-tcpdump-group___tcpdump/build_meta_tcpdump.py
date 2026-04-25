@@ -8,19 +8,21 @@ thuộc project ``the-tcpdump-group___tcpdump`` trong framework Defects4C.
 
 Với mỗi bug trong ``bugs_list_new.json``, script làm:
 
-    1. Xác định cây mã nguồn buggy (checkout ``commit_before``).
-    2. Dùng trực tiếp bộ test hiện có trong cây buggy
-       (``tests/TESTLIST`` và các asset ở ``commit_before``).
-    3. Cấu hình + biên dịch tcpdump với cờ coverage (gcov/gcno).
-    4. Parse ``tests/TESTLIST`` của buggy version và chạy ``./TESTonce`` cho **từng** test case
+    1. Checkout cây mã nguồn fixed tại ``commit_after``.
+    2. Khi cần chạy buggy, giữ nguyên fixed tree rồi overlay riêng ``src_files``
+       từ ``commit_before`` giống workflow mặc định của Defects4C.
+    3. Dùng bộ test hiện có trong fixed tree
+       (``tests/TESTLIST`` và các asset ở ``commit_after``).
+    4. Cấu hình + biên dịch tcpdump với cờ coverage (gcov/gcno).
+    5. Parse ``tests/TESTLIST`` của cây hiện tại và chạy ``./TESTonce`` cho **từng** test case
        (mặc định chạy toàn bộ TESTLIST). Trước mỗi test xoá sạch ``*.gcda``
        để lấy coverage riêng cho test đó.
-    5. Phân tích output ``gcov`` → ``covered_functions`` dạng
+    6. Phân tích output ``gcov`` → ``covered_functions`` dạng
        ``<file.c>:<func>`` mà FL của Unified-Debugging kỳ vọng.
-    6. Ghi ``{safe_bug_id}_meta.json`` vào 2 chỗ:
+    7. Ghi ``{safe_bug_id}_meta.json`` vào 2 chỗ:
          * ``raw/`` — kết quả thô, giữ nguyên outcome chạy trên buggy.
          * ``metadata/`` — cùng nội dung với ``raw/`` để Unified-Debugging dùng.
-    7. Sinh ``run_one_test.sh`` trong build tree để ``test_cmd_template``
+    8. Sinh ``run_one_test.sh`` trong build tree để ``test_cmd_template``
        có thể chạy lại đúng 1 test khi APR validate patch.
 
 Ghi chú:
@@ -290,7 +292,7 @@ def load_bugs() -> List[BugEntry]:
 
 
 # ---------------------------------------------------------------------------
-# Step 2: locate / prepare buggy source tree
+# Step 2: locate / prepare source tree
 # ---------------------------------------------------------------------------
 def ensure_repo(out_root: Path, sha_after: str, *, clone_if_missing: bool = False) -> Path:
     """Trả đường dẫn repo cho bug này. Clone nếu cần."""
@@ -332,9 +334,19 @@ def _git_checkout(repo_dir: Path, target_sha: str, label: str) -> None:
 
 
 def checkout_buggy(repo_dir: Path, bug: BugEntry) -> None:
-    """Reset về ``commit_before`` để reproduce bug."""
-    target_sha = bug.sha_before or bug.sha_after
-    _git_checkout(repo_dir, target_sha, "buggy")
+    """Mimic Defects4C default: fixed tree + overlay ``src_files`` from buggy."""
+    _git_checkout(repo_dir, bug.sha_after, "fixed-base")
+    if not bug.sha_before or not bug.src_files:
+        return
+    log(
+        "  [git] overlay buggy src from "
+        f"{bug.sha_before[:10]} onto fixed tree ({len(bug.src_files)} file(s))"
+    )
+    run(
+        ["git", "checkout", "--force", bug.sha_before, "--", *bug.src_files],
+        cwd=repo_dir,
+        check=True,
+    )
 
 
 def checkout_fixed(repo_dir: Path, bug: BugEntry) -> None:
@@ -343,7 +355,7 @@ def checkout_fixed(repo_dir: Path, bug: BugEntry) -> None:
 
 
 def existing_buggy_test_asset_basenames(repo_dir: Path, bug: BugEntry) -> List[str]:
-    """Các asset trong ``files.test`` nhưng thực sự tồn tại ở checkout buggy."""
+    """Các asset trong ``files.test`` tồn tại ở checkout hiện tại."""
     bases: List[str] = []
     for rel in bug.test_files:
         base = os.path.basename(rel)
@@ -447,10 +459,10 @@ def select_tests(
     *,
     buggy_pcap_basenames: Optional[set] = None,
 ) -> List[TestEntry]:
-    """Giữ regression test của buggy tree + bổ sung ``max_pass`` entries khác.
+    """Giữ regression test của current tree + bổ sung ``max_pass`` entries khác.
 
-    Nếu không xác định được regression pcap trong checkout buggy, chạy toàn bộ
-    ``TESTLIST`` hiện có để không phụ thuộc vào asset từ ``commit_after``.
+    Nếu không xác định được regression pcap trong checkout hiện tại, chạy toàn bộ
+    ``TESTLIST`` đang có.
     """
     pcap_names = set(buggy_pcap_basenames or [])
     if not pcap_names:
@@ -757,9 +769,9 @@ def process_bug(
     buggy_test_assets = existing_buggy_test_asset_basenames(repo_dir, bug)
     buggy_pcap_basenames = {name for name in buggy_test_assets if name.endswith(".pcap")}
     if buggy_test_assets:
-        log(f"  [tests] asset từ metadata có sẵn trong buggy tree: {len(buggy_test_assets)}")
+        log(f"  [tests] asset từ metadata có sẵn trong current tree: {len(buggy_test_assets)}")
     else:
-        log("  [tests] không thấy asset nào từ files.test trong buggy tree; dùng toàn bộ TESTLIST buggy.")
+        log("  [tests] không thấy asset nào từ files.test trong current tree; dùng toàn bộ TESTLIST hiện có.")
     selected = select_tests(
         all_entries,
         bug,
@@ -788,7 +800,7 @@ def process_bug(
     phase_info: Dict[str, object] = {
         "mode": "dual" if dual_run else "single",
         "test_policy": (
-            "buggy_tests_for_buggy_and_fixed" if dual_run else "buggy_tests"
+            "fixed_tree_tests_for_buggy_and_fixed" if dual_run else "fixed_tree_tests"
         ),
     }
 
