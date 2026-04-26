@@ -213,7 +213,7 @@ docker exec my_defects4c_php bash -lc '
 '
 ```
 
-Sit3: Chạy toàn bộ bug nhưng giới hạn test: 
+Sit3: Chạy 1 bug nhưng giới hạn test: 
 ```bash
 docker exec my_defects4c_php bash -lc '
   cd /src/projects/php___php-src && \
