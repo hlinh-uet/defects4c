@@ -183,7 +183,7 @@ docker exec my_defects4c_php bash -lc '
 '
 ```
 
-Chạy full data cho một bug:
+Sit1: Chạy full data cho một bug:
 
 ```bash
 docker exec my_defects4c_php bash -lc '
@@ -198,7 +198,7 @@ docker exec my_defects4c_php bash -lc '
 '
 ```
 
-Chạy toàn bộ bug, có resume:
+Sit2: Chạy toàn bộ bug, có resume:
 
 ```bash
 docker exec my_defects4c_php bash -lc '
@@ -210,6 +210,21 @@ docker exec my_defects4c_php bash -lc '
     --gcov-scope all \
     --test-scope all \
     --skip-if-exists
+'
+```
+
+Sit3: Chạy toàn bộ bug nhưng giới hạn test: 
+```bash
+docker exec my_defects4c_php bash -lc '
+  cd /src/projects/php___php-src && \
+  python3 build_meta_php.py \
+    --sha 28a6ed9f9a36b9c517e4a8a429baf4dd382fc5d5 \
+    --metadata-dir /out/unified_debugging/php/metadata \
+    --raw-dir /out/unified_debugging/php/raw \
+    --dual-run \
+    --gcov-scope all \
+    --test-scope all \
+    --max-tests 40
 '
 ```
 
