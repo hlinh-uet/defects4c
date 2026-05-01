@@ -38,9 +38,13 @@ project scripts:
 production C/C++ files. Test/harness coverage under `test/*` is preserved in
 `raw` but removed from `metadata`.
 
-Cppcheck's CTest suite exposes only one wrapper test named `testrunner`. The
-script expands that wrapper into individual `TestClass::testCase` entries from
-`test/test*.cpp`; for example revision `099b4435c38d` has 3070 subtests.
+Cppcheck's CTest suite exposes only one wrapper test named `testrunner`, while
+Defects4C points to cppcheck's own `TestFixture` names such as `TestCondition`
+and `TestValueFlow`. The script therefore expands tests by default to individual
+`TestClass::testCase` entries, orders the Defects4C trigger tests first, then
+applies `--max-tests`. Revision `099b4435c38d` has 3070 subtests, so the default
+`--max-tests 50` avoids running the whole suite unless explicitly requested.
+Use `--max-tests 0` only when you intentionally want all discovered tests.
 
 `--jobs 4` only controls Ninja build parallelism. Tests and coverage collection
 run sequentially to avoid `.gcda` from different tests mixing together.
@@ -103,6 +107,7 @@ docker exec my_defects4c_cppcheck bash -lc '
     --metadata-dir /out/unified_debugging/cppcheck/metadata \
     --raw-dir /out/unified_debugging/cppcheck/raw \
     --jobs 4 \
+    --max-tests 50 \
     --clone
 '
 ```
@@ -117,6 +122,7 @@ docker exec my_defects4c_cppcheck bash -lc '
     --metadata-dir /out/unified_debugging/cppcheck/metadata \
     --raw-dir /out/unified_debugging/cppcheck/raw \
     --jobs 4 \
+    --max-tests 50 \
     --phase-a-asan \
     --clone
 '
@@ -131,13 +137,32 @@ docker exec my_defects4c_cppcheck bash -lc '
     --metadata-dir /out/unified_debugging/cppcheck/metadata \
     --raw-dir /out/unified_debugging/cppcheck/raw \
     --jobs 4 \
+    --max-tests 70 \
     --skip-if-exists \
     --clone
 '
 ```
 
-`--skip-if-exists` skips only metadata already produced with cppcheck subtest
-granularity. Older wrapper-only metadata is detected and regenerated.
+`--skip-if-exists` skips only metadata already produced with the requested
+test granularity and max-test setting. Older wrapper-only metadata is detected
+and regenerated.
+
+Run one bug with all individual subtests. This is much slower because Phase B
+runs gcov once per subtest:
+
+```bash
+docker exec my_defects4c_cppcheck bash -lc '
+  cd /src/projects_v1/danmar___cppcheck && \
+  python3 build_meta_cppcheck.py \
+    --sha 099b4435c38dd52ddb38e6b1706d9c988699c082 \
+    --metadata-dir /out/unified_debugging/cppcheck/metadata \
+    --raw-dir /out/unified_debugging/cppcheck/raw \
+    --jobs 4 \
+    --test-granularity subtest \
+    --max-tests 0 \
+    --clone
+'
+```
 
 Debug faster with only test names from `c_compile.test_flags`:
 

@@ -38,6 +38,7 @@ PROJECT_NAME = PROJECT_DIR.name
 BUGS_JSON = PROJECT_DIR / "bugs_list_new.json"
 REMOTE_URL = "https://github.com/danmar/cppcheck.git"
 BUILD_DIR_NAME = "build_meta_cppcheck"
+COVERAGE_PARSER_VERSION = 2
 
 COV_CFLAGS = "-g -O0 -fprofile-arcs -ftest-coverage -Wno-error"
 COV_LDFLAGS = "-fprofile-arcs -ftest-coverage -lgcov"
@@ -50,7 +51,7 @@ _GCOV_FUNC_RE_NEW = re.compile(
     re.MULTILINE,
 )
 _GCOV_FUNC_RE_OLD = re.compile(
-    r"^function\s+(?P<name>\S+)\s+called\s+(?P<calls>\d+)\s+returned",
+    r"^function\s+(?P<name>.+?)\s+called\s+(?P<calls>\d+)\s+returned",
     re.MULTILINE,
 )
 
@@ -400,11 +401,74 @@ def discover_cppcheck_subtests(repo: Path) -> List[str]:
     return discovered
 
 
-def list_project_tests(repo: Path, build_dir: Path) -> List[str]:
-    subtests = discover_cppcheck_subtests(repo)
-    if subtests:
-        return subtests
+def discover_cppcheck_test_classes(repo: Path) -> List[str]:
+    tests_dir = repo / "test"
+    if not tests_dir.exists():
+        return []
+    register_re = re.compile(r"\bREGISTER_TEST\s*\(\s*([A-Za-z_]\w*)\s*\)")
+    classes: List[str] = []
+    seen = set()
+    for path in sorted(tests_dir.glob("test*.cpp")):
+        if path.name in {"testrunner.cpp", "testsuite.cpp"}:
+            continue
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        for class_name in register_re.findall(text):
+            if class_name not in seen:
+                seen.add(class_name)
+                classes.append(class_name)
+    return classes
+
+
+def list_project_tests(repo: Path, build_dir: Path, granularity: str) -> List[str]:
+    if granularity == "subtest":
+        subtests = discover_cppcheck_subtests(repo)
+        if subtests:
+            return subtests
+    if granularity == "class":
+        classes = discover_cppcheck_test_classes(repo)
+        if classes:
+            return classes
     return list_ctest_tests(build_dir)
+
+
+def _pascal_from_token(value: str) -> str:
+    parts = [p for p in re.split(r"[^A-Za-z0-9]+", value) if p]
+    return "".join(p[:1].upper() + p[1:] for p in parts)
+
+
+def _src_trigger_class_candidates(bug: BugEntry) -> List[str]:
+    special = {
+        "analyzerinfo": ["TestAnalyzerInformation"],
+        "astutils": ["TestAstUtils"],
+        "checkbufferoverrun": ["TestBufferOverrun"],
+        "checkclass": ["TestClass"],
+        "checkcondition": ["TestCondition"],
+        "checkleakautovar": ["TestLeakAutoVar", "TestLeakAutoVarWindows"],
+        "checkmemoryleak": ["TestMemleak"],
+        "checkuninitvar": ["TestUninitVar"],
+        "checkunusedvar": ["TestUnusedVar"],
+        "preprocessor": ["TestPreprocessor"],
+        "symboldatabase": ["TestSymbolDatabase"],
+        "templatesimplifier": ["TestSimplifyTemplate"],
+        "tokenize": ["TestTokenizer"],
+        "valueflow": ["TestValueFlow"],
+    }
+    out: List[str] = []
+    for src in bug.src_files:
+        stem = Path(src).stem.lower()
+        for candidate in special.get(stem, []):
+            if candidate not in out:
+                out.append(candidate)
+        stripped = stem
+        if stripped.startswith("check"):
+            stripped = stripped[len("check"):]
+        generated = "Test" + _pascal_from_token(stripped)
+        if generated != "Test" and generated not in out:
+            out.append(generated)
+    return out
 
 
 def build_ctest_targets(build_dir: Path, *, jobs: int, timeout: int = 2400) -> bool:
@@ -453,7 +517,13 @@ def select_tests(all_tests: List[str], bug: BugEntry) -> List[str]:
         patterns = [p.strip() for p in str(item).split("|") if p.strip()]
         for pat in patterns:
             if os.path.basename(pat) == "testrunner":
-                return all_tests
+                candidates = _src_trigger_class_candidates(bug)
+                inferred = []
+                for test_name in all_tests:
+                    class_name = test_name.split("::", 1)[0]
+                    if any(class_name == c or class_name.startswith(c) for c in candidates):
+                        inferred.append(test_name)
+                return inferred if inferred else all_tests
             for test_name in all_tests:
                 if (
                     test_name == pat
@@ -463,6 +533,15 @@ def select_tests(all_tests: List[str], bug: BugEntry) -> List[str]:
                     if test_name not in selected:
                         selected.append(test_name)
     return selected if selected else all_tests
+
+
+def order_tests_with_triggers_first(all_tests: List[str], bug: BugEntry, *, run_all_tests: bool) -> List[str]:
+    trigger_tests = select_tests(all_tests, bug)
+    if not run_all_tests:
+        return trigger_tests
+
+    trigger_set = set(trigger_tests)
+    return trigger_tests + [test_name for test_name in all_tests if test_name not in trigger_set]
 
 
 def clear_gcda(path: Path) -> None:
@@ -479,7 +558,7 @@ def run_one_ctest(build_dir: Path, test_name: str, timeout: int = 180, *, asan: 
         env.setdefault("ASAN_OPTIONS", "detect_leaks=0:abort_on_error=1")
         env.setdefault("UBSAN_OPTIONS", "print_stacktrace=1:halt_on_error=1")
     testrunner = build_dir / "bin" / "testrunner"
-    if "::" in test_name and testrunner.exists():
+    if testrunner.exists() and ("::" in test_name or test_name.startswith("Test")):
         rc, out, err = run(
             [str(testrunner), test_name],
             cwd=testrunner.parent,
@@ -778,7 +857,13 @@ def _write_meta(path: Path, record: dict) -> None:
     path.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def _existing_metadata_is_current(path: Path, *, require_coverage: bool) -> bool:
+def _existing_metadata_is_current(
+    path: Path,
+    *,
+    require_coverage: bool,
+    expected_granularity: str,
+    expected_max_tests: int,
+) -> bool:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
@@ -788,8 +873,12 @@ def _existing_metadata_is_current(path: Path, *, require_coverage: bool) -> bool
     if not (
         bool(tests)
         and not data.get("build_error")
-        and phase_info.get("test_granularity") == "cppcheck_testrunner_subtest"
+        and phase_info.get("test_granularity") == expected_granularity
     ):
+        return False
+    if int(phase_info.get("max_tests") or 0) != int(expected_max_tests or 0):
+        return False
+    if int(phase_info.get("coverage_parser_version") or 0) != COVERAGE_PARSER_VERSION:
         return False
     if require_coverage and phase_info.get("skip_coverage"):
         return False
@@ -832,15 +921,27 @@ def process_bug(
     dual_run: bool,
     run_all_tests: bool,
     phase_a_asan: bool,
+    test_granularity: str,
+    max_tests: int,
 ) -> Optional[Path]:
     safe_name = f"{bug.safe_bug_id}_meta.json"
     out_path = metadata_dir / safe_name
     raw_out_path = raw_dir / safe_name
+    phase_granularity = (
+        f"cppcheck_testrunner_{test_granularity}"
+        if test_granularity in {"class", "subtest"}
+        else "ctest"
+    )
     if skip_if_exists and out_path.exists():
-        if _existing_metadata_is_current(out_path, require_coverage=not skip_coverage):
+        if _existing_metadata_is_current(
+            out_path,
+            require_coverage=not skip_coverage,
+            expected_granularity=phase_granularity,
+            expected_max_tests=max_tests,
+        ):
             log(f"[skip] {bug.bug_id}")
             return out_path
-        log(f"[rerun] {bug.bug_id} existing metadata is wrapper-only/old format")
+        log(f"[rerun] {bug.bug_id} existing metadata has old/different test selection")
 
     log(f"=== {bug.bug_id} | {bug.type_name or ''} ===")
     try:
@@ -859,9 +960,12 @@ def process_bug(
     phase_info = {
         "dual_run": dual_run,
         "run_all_tests": run_all_tests,
+        "max_tests": max_tests,
+        "selection_policy": "trigger_tests_first_then_fill_to_max_tests",
         "skip_coverage": skip_coverage,
+        "coverage_parser_version": COVERAGE_PARSER_VERSION,
         "phase_a_build": "asan" if phase_a_asan else "plain",
-        "test_granularity": "cppcheck_testrunner_subtest",
+        "test_granularity": phase_granularity,
         "build_compat_patches": [
             "cppcheckexecutor_mystacksize_sigstksz",
             "valueflow_include_limits",
@@ -882,9 +986,13 @@ def process_bug(
         return out_path
     write_run_one_test(repo)
     build_dir = repo / BUILD_DIR_NAME
-    all_tests = list_project_tests(repo, build_dir)
-    selected = all_tests if run_all_tests else select_tests(all_tests, bug)
+    all_tests = list_project_tests(repo, build_dir, test_granularity)
+    trigger_tests = select_tests(all_tests, bug)
+    selected = order_tests_with_triggers_first(all_tests, bug, run_all_tests=run_all_tests)
+    if max_tests and max_tests > 0 and len(selected) > max_tests:
+        selected = selected[:max_tests]
     phase_info["all_tests"] = len(all_tests)
+    phase_info["trigger_tests"] = len(trigger_tests)
     phase_info["selected_tests"] = len(selected)
     log(f"  [tests] all={len(all_tests)}, selected={len(selected)}")
     if not selected:
@@ -1018,11 +1126,26 @@ def main(argv=None) -> int:
     parser.add_argument("--raw-dir", type=Path, default=_detect_default_raw_dir())
     parser.add_argument("--jobs", type=int, default=max((os.cpu_count() or 2) - 1, 1))
     parser.add_argument("--test-timeout", type=int, default=180)
+    parser.add_argument(
+        "--max-tests",
+        type=int,
+        default=50,
+        help="Maximum tests to run per bug after discovery/selection. Use 0 for unlimited.",
+    )
     parser.add_argument("--skip-coverage", action="store_true")
     parser.add_argument("--dual-run", dest="dual_run", action="store_true", default=True)
     parser.add_argument("--single-run", dest="dual_run", action="store_false")
     parser.add_argument("--run-all-tests", dest="run_all_tests", action="store_true", default=True)
     parser.add_argument("--trigger-tests-only", dest="run_all_tests", action="store_false")
+    parser.add_argument(
+        "--test-granularity",
+        choices=("class", "subtest", "ctest"),
+        default="subtest",
+        help=(
+            "cppcheck test granularity. Default 'subtest' runs individual TestClass::testCase "
+            "entries. Trigger tests are ordered first, then --max-tests is applied."
+        ),
+    )
     parser.add_argument(
         "--phase-a-asan",
         dest="phase_a_asan",
@@ -1083,6 +1206,8 @@ def main(argv=None) -> int:
                     dual_run=args.dual_run,
                     run_all_tests=args.run_all_tests,
                     phase_a_asan=args.phase_a_asan,
+                    test_granularity=args.test_granularity,
+                    max_tests=args.max_tests,
                 )
                 if out is None:
                     fail_count += 1
