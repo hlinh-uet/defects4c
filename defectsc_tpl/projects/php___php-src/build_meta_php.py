@@ -38,6 +38,7 @@ BUGS_JSON = PROJECT_DIR / "bugs_list_new.json"
 
 REMOTE_URL = "https://github.com/php/php-src.git"
 DEFAULT_TEST_TIMEOUT = 180
+COVERAGE_PARSER_VERSION = 2
 
 BASE_CFLAGS = "-Wno-error -g -O0"
 COV_CFLAGS = "-fprofile-arcs -ftest-coverage"
@@ -59,15 +60,11 @@ DEFAULT_CONFIGURE_FLAGS = [
 ]
 
 _GCOV_FUNC_RE = re.compile(
-    r"^function\s+(?P<name>\S+)\s+called\s+(?P<calls>\d+)\s+returned",
+    r"^function\s+(?P<name>.+?)\s+called\s+(?P<calls>\d+)\s+returned",
     re.MULTILINE,
 )
 _GCOV_FUNC_LINES_RE = re.compile(
     r"Function '(?P<name>[^']+)'\nLines executed:(?P<pct>[0-9.]+)%",
-    re.MULTILINE,
-)
-_ASAN_FRAME_RE = re.compile(
-    r"^\s*#\d+\s+0x[0-9a-fA-F]+\s+in\s+(?P<func>\S+)\s+(?P<file>/\S+?):\d+",
     re.MULTILINE,
 )
 _PHP_TEST_COUNT_RE = re.compile(
@@ -467,8 +464,6 @@ def run_tests(
         covered_funcs: List[str] = []
         if collect_cov:
             covered_funcs = coverage_to_qualified(collect_coverage(repo_dir))
-            if not covered_funcs and not passed:
-                covered_funcs = fallback_coverage_from_output(combined_output, repo_dir)
             if covered_funcs:
                 n_with_cov += 1
         results.append(TestResult(
@@ -499,8 +494,25 @@ def _source_candidates(repo_dir: Path, gcda: Path) -> List[Path]:
         local = gcda.parent / name
         if local.exists():
             out.append(local)
-        out.extend(repo_dir.rglob(name))
     return list(dict.fromkeys(out))
+
+
+def _source_from_gcov_output(repo_dir: Path, gcda: Path, output: str) -> Optional[Path]:
+    for match in re.finditer(r"^File '([^']+)'", output, re.MULTILINE):
+        raw = match.group(1)
+        if raw.startswith("/"):
+            candidate = Path(raw)
+        else:
+            candidate = (gcda.parent / raw).resolve()
+        try:
+            rel = candidate.relative_to(repo_dir)
+        except ValueError:
+            continue
+        if ".git" in rel.parts:
+            continue
+        if candidate.suffix in {".c", ".h"}:
+            return candidate
+    return None
 
 
 def collect_coverage(repo_dir: Path) -> Dict[str, List[str]]:
@@ -517,15 +529,19 @@ def collect_coverage(repo_dir: Path) -> Dict[str, List[str]]:
 
     for gcda in gcda_files:
         funcs_called: List[str] = []
-        src_candidates = _source_candidates(repo_dir, gcda)
-        src_path = next((p for p in src_candidates if p.exists()), None)
         rc, out, _ = run(
             ["gcov", "-f", "-b", "-c", gcda.name],
             cwd=gcda.parent,
             capture=True,
             timeout=30,
         )
-        if rc != 0 or src_path is None:
+        if rc != 0:
+            continue
+        src_path = _source_from_gcov_output(repo_dir, gcda, out)
+        if src_path is None:
+            src_candidates = _source_candidates(repo_dir, gcda)
+            src_path = next((p for p in src_candidates if p.exists()), None)
+        if src_path is None:
             continue
         for m in _GCOV_FUNC_LINES_RE.finditer(out):
             try:
@@ -567,20 +583,6 @@ def coverage_to_qualified(cov_map: Dict[str, List[str]]) -> List[str]:
     return sorted(set(out))
 
 
-def fallback_coverage_from_output(output: str, repo_dir: Path) -> List[str]:
-    repo_prefix = str(repo_dir)
-    covered: List[str] = []
-    for m in _ASAN_FRAME_RE.finditer(output):
-        func = m.group("func")
-        src = m.group("file")
-        if not src.startswith(repo_prefix):
-            continue
-        if func.startswith("__interceptor_"):
-            continue
-        covered.append(f"{os.path.basename(src)}:{func}")
-    return sorted(set(covered))
-
-
 def write_run_one_test(repo_dir: Path, entries: List[TestEntry]) -> None:
     case_lines = []
     for te in entries:
@@ -619,7 +621,113 @@ def _test_to_dict(r: TestResult) -> dict:
 
 def _write_meta(path: Path, record: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _existing_metadata_is_current(path: Path) -> bool:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if data.get("build_error"):
+        return False
+    phase_info = data.get("phase_info") or {}
+    try:
+        version = int(phase_info.get("coverage_parser_version") or 0)
+    except (TypeError, ValueError):
+        version = 0
+    if version != COVERAGE_PARSER_VERSION or not isinstance(data.get("tests"), list):
+        return False
+    if phase_info.get("phase_b_status") == "compile_failed":
+        return False
+    if phase_info.get("phase_b_scope") != "skip_coverage":
+        if phase_info.get("mode") == "dual" and "phase_b_with_coverage" not in phase_info:
+            return False
+        if phase_info.get("mode") == "single" and "with_coverage" not in phase_info:
+            return False
+    return True
+
+
+def _php_symbol_from_hunk_signature(signature: str) -> str:
+    for macro in ("PHP_FUNCTION", "ZEND_FUNCTION"):
+        match = re.search(rf"\b{macro}\s*\(\s*([A-Za-z_]\w*)\s*\)", signature)
+        if match:
+            return f"zif_{match.group(1)}"
+
+    for macro in ("PHP_METHOD", "ZEND_METHOD", "SPL_METHOD"):
+        match = re.search(
+            rf"\b{macro}\s*\(\s*([A-Za-z_]\w*)\s*,\s*([A-Za-z_]\w*)\s*\)",
+            signature,
+        )
+        if match:
+            return f"zim_{match.group(1)}_{match.group(2)}"
+
+    c_keywords = {"if", "for", "while", "switch", "return", "sizeof", "case", "do"}
+    match = re.match(r".*?\b([A-Za-z_]\w*)\s*\(", signature)
+    if match and match.group(1) not in c_keywords:
+        return match.group(1)
+    return ""
+
+
+def _php_symbol_at_line(repo_dir: Path, bug: BugEntry, src_file: str, line_number: int) -> str:
+    if line_number <= 0:
+        return ""
+    rc, text, _ = run(
+        ["git", "show", f"{bug.sha_after}:{src_file}"],
+        cwd=repo_dir,
+        capture=True,
+    )
+    if rc != 0 or not text:
+        path = repo_dir / src_file
+        if not path.exists():
+            return ""
+        text = path.read_text(encoding="utf-8", errors="replace")
+
+    line_offsets = [0]
+    for match in re.finditer("\n", text):
+        line_offsets.append(match.end())
+    target_offset = line_offsets[min(line_number - 1, len(line_offsets) - 1)]
+    prefix = text[:target_offset]
+
+    macro_matches = list(re.finditer(
+        r"\b(?:PHP_FUNCTION|ZEND_FUNCTION|PHP_METHOD|ZEND_METHOD|SPL_METHOD)\s*\([^)]*\)",
+        prefix,
+    ))
+    normal_matches = list(re.finditer(
+        r"(?m)^[A-Za-z_][\w\s\*]*\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{",
+        prefix,
+    ))
+
+    candidates: List[Tuple[int, str]] = []
+    for match in macro_matches:
+        symbol = _php_symbol_from_hunk_signature(match.group(0))
+        if symbol:
+            candidates.append((match.start(), symbol))
+    for match in normal_matches:
+        candidates.append((match.start(), match.group(1)))
+    if not candidates:
+        return ""
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def _ground_truth_from_locations(bug: BugEntry, repo_dir: Path) -> List[str]:
+    files = bug.raw.get("files") or {}
+    funcs: List[str] = []
+    for idx, src_file in enumerate(bug.src_files):
+        location = files.get(f"src{idx}_location") or {}
+        if not isinstance(location, dict):
+            continue
+        line_number = location.get("func_start") or location.get("hunk_start") or location.get("line_number")
+        try:
+            line_number = int(line_number)
+        except (TypeError, ValueError):
+            continue
+        symbol = _php_symbol_at_line(repo_dir, bug, src_file, line_number)
+        if symbol:
+            funcs.append(symbol)
+    return sorted(set(funcs))
 
 
 def _extract_ground_truth_funcs(bug: BugEntry, repo_dir: Path) -> List[str]:
@@ -633,16 +741,15 @@ def _extract_ground_truth_funcs(bug: BugEntry, repo_dir: Path) -> List[str]:
     if rc != 0 or not diff:
         return []
     funcs = set()
-    c_keywords = {"if", "for", "while", "switch", "return", "sizeof", "case", "do"}
     for line in diff.splitlines():
         if line.startswith("@@"):
             tail = line.split("@@", 2)[-1].strip()
-            m = re.match(r".*?\b([A-Za-z_]\w*)\s*\(", tail)
-            if m:
-                name = m.group(1)
-                if name not in c_keywords:
-                    funcs.add(name)
-    return sorted(funcs)
+            name = _php_symbol_from_hunk_signature(tail)
+            if name:
+                funcs.add(name)
+    if funcs:
+        return sorted(funcs)
+    return _ground_truth_from_locations(bug, repo_dir)
 
 
 def _empty_record(bug: BugEntry, repo_dir: Path, compile_cmd: str, *, error: str) -> dict:
@@ -793,6 +900,7 @@ def process_bug(
     source_file = str(repo_dir / bug.src_files[0]) if bug.src_files else ""
     ground_truth_functions = _extract_ground_truth_funcs(bug, repo_dir)
     test_cmd_template = f"bash {shlex.quote(str(repo_dir / 'run_one_test.sh'))} {{test_id}}"
+    phase_info["coverage_parser_version"] = COVERAGE_PARSER_VERSION
     record = {
         "bug_id": bug.bug_id,
         "dataset_name": "defects4c",
@@ -900,9 +1008,11 @@ def main(argv=None) -> int:
         for idx, bug in enumerate(bugs, 1):
             out_path = args.metadata_dir / f"{bug.safe_bug_id}_meta.json"
             if args.skip_if_exists and out_path.exists():
-                log(f"[{idx}/{len(bugs)}] skip existing {bug.bug_id}")
-                ok += 1
-                continue
+                if _existing_metadata_is_current(out_path):
+                    log(f"[{idx}/{len(bugs)}] skip existing {bug.bug_id}")
+                    ok += 1
+                    continue
+                log(f"[{idx}/{len(bugs)}] rerun existing {bug.bug_id} (old/invalid parser)")
             log(f"[{idx}/{len(bugs)}] {bug.bug_id} after={bug.sha_after[:12]}")
             result = process_bug(
                 bug,

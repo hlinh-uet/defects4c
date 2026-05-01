@@ -38,7 +38,7 @@ PROJECT_NAME = PROJECT_DIR.name
 BUGS_JSON = PROJECT_DIR / "bugs_list_new.json"
 REMOTE_URL = "https://github.com/danmar/cppcheck.git"
 BUILD_DIR_NAME = "build_meta_cppcheck"
-COVERAGE_PARSER_VERSION = 2
+COVERAGE_PARSER_VERSION = 3
 
 COV_CFLAGS = "-g -O0 -fprofile-arcs -ftest-coverage -Wno-error"
 COV_LDFLAGS = "-fprofile-arcs -ftest-coverage -lgcov"
@@ -701,13 +701,59 @@ def _normalize_cpp_function(name: str) -> str:
     name = re.sub(r"\s+", " ", str(name)).strip()
     if not name:
         return ""
-    if "(" in name:
-        name = name.split("(", 1)[0].strip()
-    prefixes = {"virtual", "static", "constexpr", "const", "inline", "typename", "class", "struct"}
-    parts = name.split()
-    while parts and parts[0] in prefixes:
-        parts.pop(0)
-    return " ".join(parts).strip()
+    name = _strip_cpp_parameter_list(name)
+    name = re.sub(r"^(virtual|static|constexpr|const|inline|typename|class|struct)\s+", "", name)
+    name = _drop_cpp_return_type(name)
+    name = _strip_cpp_template_args(name)
+    return name.strip()
+
+
+def _strip_cpp_parameter_list(name: str) -> str:
+    angle_depth = 0
+    for idx, ch in enumerate(name):
+        if ch == "<":
+            angle_depth += 1
+        elif ch == ">" and angle_depth:
+            angle_depth -= 1
+        elif ch == "(" and angle_depth == 0:
+            if name[max(0, idx - 8):idx] == "operator":
+                continue
+            return name[:idx].strip()
+    return name
+
+
+def _drop_cpp_return_type(name: str) -> str:
+    if "operator " in name:
+        return name
+    angle_depth = 0
+    last_top_level_space = -1
+    for idx, ch in enumerate(name):
+        if ch == "<":
+            angle_depth += 1
+        elif ch == ">" and angle_depth:
+            angle_depth -= 1
+        elif ch.isspace() and angle_depth == 0:
+            last_top_level_space = idx
+    if last_top_level_space >= 0:
+        candidate = name[last_top_level_space + 1:].strip()
+        if candidate:
+            return candidate
+    return name
+
+
+def _strip_cpp_template_args(name: str) -> str:
+    out: List[str] = []
+    angle_depth = 0
+    for ch in name:
+        if ch == "<":
+            angle_depth += 1
+            continue
+        if ch == ">" and angle_depth:
+            angle_depth -= 1
+            continue
+        if angle_depth == 0:
+            out.append(ch)
+    return re.sub(r"\s+", " ", "".join(out)).strip()
 
 
 def extract_ground_truth(bug: BugEntry, repo: Path) -> List[str]:

@@ -5,10 +5,11 @@ Build Unified-Debugging metadata for Defects4C project fmtlib___fmt.
 For each bug:
   1. Use commit_after as the fixed tree.
   2. Use commit_after plus src_files checked out from commit_before as buggy tree.
-  3. Phase A: build without sanitizer by default and run CTest on buggy + fixed
-     to collect outcomes. ASAN/UBSAN is available with --phase-a-asan.
-  4. Phase B: build buggy without ASAN but with gcov flags, run CTest one by one,
-     and collect per-test coverage.
+  3. Phase A: build without sanitizer by default, expand CTest binaries to
+     GoogleTest test cases, then run each case on buggy + fixed to collect
+     outcomes. ASAN/UBSAN is available with --phase-a-asan.
+  4. Phase B: build buggy without ASAN but with gcov flags, run each selected
+     test case one by one, and collect per-test coverage.
   5. Write full gcov coverage to raw/ and production-only coverage to metadata/.
 """
 
@@ -39,6 +40,7 @@ PROJECT_NAME = PROJECT_DIR.name
 BUGS_JSON = PROJECT_DIR / "bugs_list_new.json"
 REMOTE_URL = "https://github.com/fmtlib/fmt.git"
 BUILD_DIR_NAME = "build_meta_fmt"
+GCOV_SIGNAL_HEADER = "__build_meta_gcov_signal_dump.h"
 
 COV_CFLAGS = "-g -O0 -fprofile-arcs -ftest-coverage -Wno-error"
 COV_LDFLAGS = "-fprofile-arcs -ftest-coverage -lgcov"
@@ -58,7 +60,7 @@ _GCOV_FUNC_RE_NEW = re.compile(
     re.MULTILINE,
 )
 _GCOV_FUNC_RE_OLD = re.compile(
-    r"^function\s+(?P<name>\S+)\s+called\s+(?P<calls>\d+)\s+returned",
+    r"^function\s+(?P<name>.+?)\s+called\s+(?P<calls>\d+)\s+returned",
     re.MULTILINE,
 )
 
@@ -94,6 +96,22 @@ class TestResult:
     actual_output: str = ""
     covered_functions: List[str] = field(default_factory=list)
     coverage_error: str = ""
+
+
+@dataclass
+class CTestEntry:
+    name: str
+    command: List[str] = field(default_factory=list)
+    working_directory: str = ""
+
+
+@dataclass
+class TestSpec:
+    test_id: str
+    ctest_name: str
+    command: List[str] = field(default_factory=list)
+    working_directory: str = ""
+    gtest_filter: str = ""
 
 
 def log(msg: str) -> None:
@@ -242,6 +260,41 @@ def checkout_fixed(repo: Path, bug: BugEntry) -> None:
     _git_checkout(repo, bug.sha_after, "fixed")
 
 
+def write_gcov_signal_header(repo: Path) -> Path:
+    header = repo / GCOV_SIGNAL_HEADER
+    header.write_text(
+        textwrap.dedent(
+            r"""
+            #pragma once
+            #include <signal.h>
+            #include <stdlib.h>
+
+            #ifdef __cplusplus
+            extern "C" void __gcov_dump(void);
+            #else
+            void __gcov_dump(void);
+            #endif
+
+            static void build_meta_gcov_dump_and_exit(int sig) {
+              __gcov_dump();
+              _Exit(128 + sig);
+            }
+
+            __attribute__((constructor))
+            static void build_meta_gcov_install_signal_handlers(void) {
+              signal(SIGABRT, build_meta_gcov_dump_and_exit);
+              signal(SIGSEGV, build_meta_gcov_dump_and_exit);
+              signal(SIGILL, build_meta_gcov_dump_and_exit);
+              signal(SIGFPE, build_meta_gcov_dump_and_exit);
+              signal(SIGTERM, build_meta_gcov_dump_and_exit);
+            }
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    return header
+
+
 def compile_project(repo: Path, *, jobs: int, asan: bool, coverage: bool, timeout: int = 1800) -> bool:
     env = os.environ.copy()
     env["CC"] = env.get("CC", "gcc")
@@ -249,7 +302,9 @@ def compile_project(repo: Path, *, jobs: int, asan: bool, coverage: bool, timeou
     cflags = "-g -O0 -Wno-error"
     ldflags = ""
     if coverage:
+        signal_header = write_gcov_signal_header(repo)
         cflags = COV_CFLAGS
+        cflags += f" -include {shlex.quote(str(signal_header))}"
         ldflags = COV_LDFLAGS
     if asan:
         cflags = ASAN_CFLAGS
@@ -341,15 +396,9 @@ def build_ctest_targets(build_dir: Path, *, jobs: int, timeout: int = 1800) -> b
 
 
 def list_ctest_tests(build_dir: Path) -> List[str]:
-    rc, out, err = run(["ctest", "--test-dir", str(build_dir), "--show-only=json-v1"], cwd=build_dir, timeout=60)
-    if rc == 0:
-        try:
-            payload = json.loads(out)
-            names = [t.get("name") for t in payload.get("tests", []) if t.get("name")]
-            if names:
-                return names
-        except json.JSONDecodeError as exc:
-            log(f"  [tests] ctest json parse failed: {exc}")
+    entries = list_ctest_entries(build_dir)
+    if entries:
+        return [entry.name for entry in entries]
 
     rc, out, err = run(["ctest", "--test-dir", str(build_dir), "--show-only=human"], cwd=build_dir, timeout=60)
     if rc != 0:
@@ -361,6 +410,33 @@ def list_ctest_tests(build_dir: Path) -> List[str]:
         if m:
             names.append(m.group(1))
     return names
+
+
+def list_ctest_entries(build_dir: Path) -> List[CTestEntry]:
+    rc, out, err = run(["ctest", "--test-dir", str(build_dir), "--show-only=json-v1"], cwd=build_dir, timeout=60)
+    if rc == 0:
+        try:
+            payload = json.loads(out)
+            entries: List[CTestEntry] = []
+            for test in payload.get("tests", []):
+                name = test.get("name") or ""
+                if not name:
+                    continue
+                working_directory = ""
+                for prop in test.get("properties", []):
+                    if prop.get("name") == "WORKING_DIRECTORY":
+                        working_directory = str(prop.get("value") or "")
+                        break
+                entries.append(CTestEntry(
+                    name=name,
+                    command=[str(arg) for arg in test.get("command", [])],
+                    working_directory=working_directory,
+                ))
+            if entries:
+                return entries
+        except json.JSONDecodeError as exc:
+            log(f"  [tests] ctest json parse failed: {exc}")
+    return []
 
 
 def select_tests(all_tests: List[str], bug: BugEntry) -> List[str]:
@@ -375,6 +451,87 @@ def select_tests(all_tests: List[str], bug: BugEntry) -> List[str]:
                     if test_name not in selected:
                         selected.append(test_name)
     return selected if selected else all_tests
+
+
+def discover_test_specs(build_dir: Path, ctest_names: List[str]) -> List[TestSpec]:
+    entries_by_name = {entry.name: entry for entry in list_ctest_entries(build_dir)}
+    specs: List[TestSpec] = []
+    for ctest_name in ctest_names:
+        entry = entries_by_name.get(ctest_name) or CTestEntry(name=ctest_name)
+        case_names = list_gtest_cases(entry, timeout=60)
+        if not case_names:
+            specs.append(TestSpec(
+                test_id=ctest_name,
+                ctest_name=ctest_name,
+                command=entry.command,
+                working_directory=entry.working_directory,
+            ))
+            continue
+        for case_name in case_names:
+            specs.append(TestSpec(
+                test_id=f"{ctest_name}::{case_name}",
+                ctest_name=ctest_name,
+                command=entry.command,
+                working_directory=entry.working_directory,
+                gtest_filter=case_name,
+            ))
+    return specs
+
+
+def list_gtest_cases(entry: CTestEntry, timeout: int = 60) -> List[str]:
+    if not entry.command:
+        return []
+    env = os.environ.copy()
+    env.setdefault("GTEST_COLOR", "no")
+    cwd = entry.working_directory or None
+    rc, out, err = run([*entry.command, "--gtest_list_tests"], cwd=cwd, env=env, timeout=timeout)
+    if rc != 0:
+        return []
+    cases = _parse_gtest_list(out)
+    if not cases and "This program contains tests written using Google Test" in (out + err):
+        return []
+    return cases
+
+
+def _parse_gtest_list(text: str) -> List[str]:
+    cases: List[str] = []
+    suite = ""
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        if not line.strip():
+            continue
+        if not line.startswith(" ") and line.endswith("."):
+            suite = line.strip()[:-1]
+            continue
+        if not suite or not line.startswith(" "):
+            continue
+        case_name = line.strip().split("#", 1)[0].strip()
+        if not case_name:
+            continue
+        if suite.startswith("DISABLED_") or case_name.startswith("DISABLED_"):
+            continue
+        cases.append(f"{suite}.{case_name}")
+    return cases
+
+
+def select_test_specs(all_specs: List[TestSpec], bug: BugEntry) -> List[TestSpec]:
+    if not bug.test_flags:
+        return all_specs
+    selected: List[TestSpec] = []
+    seen: set[str] = set()
+    for item in bug.test_flags:
+        patterns = [p.strip() for p in str(item).split("|") if p.strip()]
+        for pat in patterns:
+            regex = pat.replace("*", ".*")
+            for spec in all_specs:
+                candidates = [spec.ctest_name, spec.test_id]
+                if spec.gtest_filter:
+                    candidates.append(spec.gtest_filter)
+                matched = any(candidate == pat or re.match(regex, candidate) for candidate in candidates)
+                if matched and spec.test_id not in seen:
+                    selected.append(spec)
+                    seen.add(spec.test_id)
+    return selected if selected else all_specs
 
 
 def clear_gcda(path: Path) -> None:
@@ -407,6 +564,32 @@ def run_one_ctest(build_dir: Path, test_name: str, timeout: int = 120, *, asan: 
     return passed, combined
 
 
+def run_one_test_spec(build_dir: Path, spec: TestSpec, timeout: int = 120, *, asan: bool = False) -> Tuple[bool, str]:
+    if not spec.gtest_filter:
+        return run_one_ctest(build_dir, spec.ctest_name, timeout=timeout, asan=asan)
+    if not spec.command:
+        return False, f"missing gtest command for {spec.test_id}"
+
+    env = os.environ.copy()
+    env.setdefault("GTEST_COLOR", "no")
+    if asan:
+        env.setdefault("ASAN_OPTIONS", "detect_leaks=0:abort_on_error=1")
+        env.setdefault("UBSAN_OPTIONS", "print_stacktrace=1:halt_on_error=1")
+    rc, out, err = run(
+        [*spec.command, f"--gtest_filter={spec.gtest_filter}", "--gtest_color=no"],
+        cwd=spec.working_directory or build_dir,
+        env=env,
+        timeout=timeout + 30,
+    )
+    combined = (out or "") + ("\n" + err if err else "")
+    passed = rc == 0
+    if re.search(r"Running\s+0\s+tests|0 tests? from 0 test", combined):
+        passed = False
+    if "[  FAILED  ]" in combined or "***Failed" in combined or "***Timeout" in combined:
+        passed = False
+    return passed, combined
+
+
 def _parse_gcov_functions(text: str) -> List[str]:
     funcs: List[str] = []
     for match in _GCOV_FUNC_RE_NEW.finditer(text):
@@ -434,6 +617,32 @@ def _source_from_gcov_text(text: str) -> str:
     return ""
 
 
+def _parse_gcov_line_functions(gcov_text: str, source_text: str, line_function_map: Optional[Dict[int, str]] = None) -> List[str]:
+    funcs: List[str] = []
+    if not source_text:
+        return funcs
+    if line_function_map is None:
+        line_function_map = _build_cpp_function_line_map(source_text)
+    for line in gcov_text.splitlines():
+        parts = line.split(":", 2)
+        if len(parts) < 3:
+            continue
+        count_text = parts[0].strip()
+        line_no_text = parts[1].strip()
+        if count_text in {"-", "#####", "====="} or not count_text:
+            continue
+        try:
+            line_no = int(line_no_text)
+        except ValueError:
+            continue
+        if line_no <= 0:
+            continue
+        fn = line_function_map.get(line_no, "")
+        if fn:
+            funcs.append(fn)
+    return funcs
+
+
 def collect_coverage(repo: Path, build_dir: Path, *, verbose: bool = False) -> Tuple[Dict[str, List[str]], str]:
     if not shutil.which("gcov"):
         return {}, "gcov_not_found"
@@ -450,6 +659,8 @@ def collect_coverage(repo: Path, build_dir: Path, *, verbose: bool = False) -> T
             pass
 
     covered: Dict[str, List[str]] = {}
+    source_text_cache: Dict[Path, str] = {}
+    line_function_cache: Dict[Path, Dict[int, str]] = {}
     for gcda in gcda_files:
         gcda_dir = gcda.parent
         rc, out, err = run(["gcov", "-m", "-f", "-b", "-c", gcda.name], cwd=gcda_dir, timeout=60)
@@ -463,8 +674,7 @@ def collect_coverage(repo: Path, build_dir: Path, *, verbose: bool = False) -> T
             except OSError:
                 continue
             source = _source_from_gcov_text(text)
-            funcs = _parse_gcov_functions(text)
-            if not source or not funcs:
+            if not source:
                 continue
             src_path = Path(source)
             if not src_path.is_absolute():
@@ -474,6 +684,19 @@ def collect_coverage(repo: Path, build_dir: Path, *, verbose: bool = False) -> T
             except ValueError:
                 continue
             if rel.startswith(BUILD_DIR_NAME + "/"):
+                continue
+            funcs = _parse_gcov_functions(text)
+            if src_path not in source_text_cache:
+                try:
+                    source_text_cache[src_path] = src_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    source_text_cache[src_path] = ""
+            source_text = source_text_cache[src_path]
+            if src_path not in line_function_cache:
+                line_function_cache[src_path] = _build_cpp_function_line_map(source_text)
+            funcs.extend(_parse_gcov_line_functions(text, source_text, line_function_cache[src_path]))
+            funcs = [fn for fn in funcs if fn]
+            if not funcs:
                 continue
             covered.setdefault(rel, [])
             covered[rel].extend(funcs)
@@ -521,12 +744,69 @@ def _normalize_cpp_function(name: str) -> str:
     name = re.sub(r"\s+", " ", str(name)).strip()
     if not name:
         return ""
-    if "(" in name:
-        name = name.split("(", 1)[0].strip()
+    name = _strip_cpp_parameter_list(name)
     name = re.sub(r"^(virtual|static|constexpr|const|inline|typename)\s+", "", name)
+    if name.startswith("fmt::"):
+        name = name[len("fmt::"):]
     name = name.replace("fmt::v5::", "").replace("fmt::v6::", "").replace("fmt::v7::", "")
     name = name.replace("fmt::v8::", "").replace("fmt::v9::", "").replace("fmt::v10::", "")
+    name = name.replace("v5::", "").replace("v6::", "").replace("v7::", "")
+    name = name.replace("v8::", "").replace("v9::", "").replace("v10::", "")
+    name = _drop_cpp_return_type(name)
+    name = _strip_cpp_template_args(name)
+    for internal_prefix in ("detail::", "internal::"):
+        if name.startswith(internal_prefix):
+            name = name[len(internal_prefix):]
+            break
     return name.strip()
+
+
+def _strip_cpp_parameter_list(name: str) -> str:
+    angle_depth = 0
+    for idx, ch in enumerate(name):
+        if ch == "<":
+            angle_depth += 1
+        elif ch == ">" and angle_depth:
+            angle_depth -= 1
+        elif ch == "(" and angle_depth == 0:
+            if name[max(0, idx - 8):idx] == "operator":
+                continue
+            return name[:idx].strip()
+    return name
+
+
+def _drop_cpp_return_type(name: str) -> str:
+    if "operator " in name:
+        return name
+    angle_depth = 0
+    last_top_level_space = -1
+    for idx, ch in enumerate(name):
+        if ch == "<":
+            angle_depth += 1
+        elif ch == ">" and angle_depth:
+            angle_depth -= 1
+        elif ch.isspace() and angle_depth == 0:
+            last_top_level_space = idx
+    if last_top_level_space >= 0:
+        candidate = name[last_top_level_space + 1:].strip()
+        if candidate:
+            return candidate
+    return name
+
+
+def _strip_cpp_template_args(name: str) -> str:
+    out: List[str] = []
+    angle_depth = 0
+    for ch in name:
+        if ch == "<":
+            angle_depth += 1
+            continue
+        if ch == ">" and angle_depth:
+            angle_depth -= 1
+            continue
+        if angle_depth == 0:
+            out.append(ch)
+    return re.sub(r"\s+", " ", "".join(out)).strip()
 
 
 def extract_ground_truth(bug: BugEntry, repo: Path) -> List[str]:
@@ -536,19 +816,34 @@ def extract_ground_truth(bug: BugEntry, repo: Path) -> List[str]:
     source_cache: Dict[str, str] = {}
     rc, diff, _ = run(["git", "diff", bug.sha_before, bug.sha_after, "--", *bug.src_files], cwd=repo)
     if rc == 0 and diff:
+        changed_lines = _changed_new_lines_from_diff(diff)
+        for src_file, line_numbers in changed_lines.items():
+            if src_file not in bug.src_files:
+                continue
+            if src_file not in source_cache:
+                rc_show, text, _ = run(["git", "show", f"{bug.sha_after}:{src_file}"], cwd=repo)
+                source_cache[src_file] = text if rc_show == 0 else ""
+            for line_no in line_numbers:
+                fn = _find_enclosing_cpp_function(source_cache[src_file], line_no)
+                if fn:
+                    funcs.add(fn)
+                    break
+
         for line in diff.splitlines():
             if not line.startswith("@@"):
                 continue
+            if funcs:
+                break
             tail = line.split("@@", 2)[-1].strip()
             header_func = _function_from_diff_tail(tail)
-            if header_func:
-                funcs.add(header_func)
-                continue
             hunk = re.match(r"@@\s+-\d+(?:,\d+)?\s+\+(?P<start>\d+)(?:,(?P<count>\d+))?", line)
             if not hunk:
+                if header_func:
+                    funcs.add(header_func)
                 continue
             start = int(hunk.group("start"))
             count = int(hunk.group("count") or "1")
+            found_scoped = False
             for src_file in bug.src_files:
                 if src_file not in source_cache:
                     rc_show, text, _ = run(["git", "show", f"{bug.sha_after}:{src_file}"], cwd=repo)
@@ -557,7 +852,10 @@ def extract_ground_truth(bug: BugEntry, repo: Path) -> List[str]:
                     fn = _find_enclosing_cpp_function(source_cache[src_file], candidate_line)
                     if fn:
                         funcs.add(fn)
+                        found_scoped = True
                         break
+            if header_func and not found_scoped:
+                funcs.add(header_func)
 
     if not funcs:
         loc = (bug.raw.get("files") or {}).get("src0_location") or {}
@@ -571,6 +869,32 @@ def extract_ground_truth(bug: BugEntry, repo: Path) -> List[str]:
                         funcs.add(fn)
 
     return sorted(funcs)
+
+
+def _changed_new_lines_from_diff(diff: str) -> Dict[str, List[int]]:
+    changed: Dict[str, List[int]] = {}
+    current_file = ""
+    new_line = 0
+
+    for line in diff.splitlines():
+        if line.startswith("+++ b/"):
+            current_file = line[len("+++ b/"):].strip()
+            changed.setdefault(current_file, [])
+            continue
+        hunk = re.match(r"@@\s+-\d+(?:,\d+)?\s+\+(?P<start>\d+)(?:,\d+)?\s+@@", line)
+        if hunk:
+            new_line = int(hunk.group("start"))
+            continue
+        if not current_file or not new_line:
+            continue
+        if line.startswith("+") and not line.startswith("+++"):
+            changed.setdefault(current_file, []).append(new_line)
+            new_line += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            changed.setdefault(current_file, []).append(new_line)
+        elif line.startswith(" "):
+            new_line += 1
+    return {path: sorted(set(lines)) for path, lines in changed.items() if lines}
 
 
 def _function_from_diff_tail(tail: str) -> str:
@@ -588,28 +912,70 @@ def _function_from_diff_tail(tail: str) -> str:
 def _find_enclosing_cpp_function(source: str, line_number: int) -> str:
     if not source or line_number <= 0:
         return ""
+    line_functions = _build_cpp_function_line_map(source)
+    return line_functions.get(line_number, "")
+
+
+def _build_cpp_function_line_map(source: str) -> Dict[int, str]:
+    if not source:
+        return {}
     lines = source.splitlines()
-    idx = min(max(line_number - 1, 0), len(lines) - 1)
-    lower = max(0, idx - 120)
-    signature_parts: List[str] = []
-    for line_idx in range(idx, lower - 1, -1):
-        line = lines[line_idx].strip()
-        if not line or line.startswith("//"):
+    line_functions: Dict[int, str] = {}
+    scope_stack: List[Tuple[int, str]] = []
+    function_stack: List[Tuple[int, str]] = []
+    brace_depth = 0
+    pending = ""
+    namespace_re = re.compile(r"\bnamespace\s+([A-Za-z_]\w*)\b")
+    type_re = re.compile(r"\b(?:class|struct)\s+([A-Za-z_]\w*)\b")
+
+    for line_no, raw_line in enumerate(lines, 1):
+        line = re.sub(r"//.*", "", raw_line)
+        line = re.sub(r"/\*.*?\*/", " ", line)
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            pending = ""
+            if function_stack:
+                line_functions[line_no] = function_stack[-1][1]
             continue
-        if line.startswith("#"):
-            signature_parts = []
-            continue
-        signature_parts.insert(0, line)
-        joined = " ".join(signature_parts)
-        if ";" in joined and "{" not in joined:
-            signature_parts = []
-            continue
-        if "(" not in joined:
-            continue
-        name = _function_from_signature(joined)
-        if name:
-            return name
-    return ""
+
+        before_open = ""
+        if "{" in stripped:
+            before_open = f"{pending} {stripped.split('{', 1)[0]}".strip()
+
+        namespace_match = namespace_re.search(before_open)
+        type_match = type_re.search(before_open)
+        opens = line.count("{")
+        closes = line.count("}")
+
+        if opens:
+            if namespace_match:
+                scope_stack.append((brace_depth + 1, namespace_match.group(1)))
+            elif type_match:
+                scope_stack.append((brace_depth + 1, type_match.group(1)))
+            else:
+                fn = _function_from_signature(before_open)
+                if fn:
+                    if "::" not in fn and scope_stack:
+                        fn = _normalize_cpp_function(
+                            f"{'::'.join(name for _, name in scope_stack)}::{fn}"
+                        )
+                    function_stack.append((brace_depth + 1, fn))
+
+        brace_depth += opens - closes
+        while function_stack and brace_depth < function_stack[-1][0]:
+            function_stack.pop()
+        while scope_stack and brace_depth < scope_stack[-1][0]:
+            scope_stack.pop()
+
+        if "{" in stripped or "}" in stripped or stripped.endswith(";"):
+            pending = ""
+        else:
+            pending = f"{pending} {stripped}".strip()
+
+        if function_stack:
+            line_functions[line_no] = function_stack[-1][1]
+
+    return line_functions
 
 
 def _function_from_signature(signature: str) -> str:
@@ -618,12 +984,13 @@ def _function_from_signature(signature: str) -> str:
     signature = re.sub(r"\s+", " ", signature).strip()
     if not signature or signature.startswith(("if ", "for ", "while ", "switch ", "return ")):
         return ""
-    before_args = signature.split("(", 1)[0].strip()
+    before_args = _strip_cpp_parameter_list(signature)
     before_args = before_args.replace("FMT_CONSTEXPR", " ").replace("FMT_INLINE", " ")
-    tokens = re.findall(r"[A-Za-z_~][\w:~]*", before_args)
-    if not tokens:
+    if "[" in before_args or "]" in before_args or before_args.endswith("="):
         return ""
-    name = _normalize_cpp_function(tokens[-1])
+    name = _normalize_cpp_function(before_args)
+    if not name:
+        return ""
     leaf = name.rsplit("::", 1)[-1]
     if leaf in {"if", "for", "while", "switch", "return", "sizeof"}:
         return ""
@@ -637,10 +1004,16 @@ RUN_ONE_TEST_SH = textwrap.dedent(r"""
     HERE=$(cd "$(dirname "$0")" && pwd)
     TEST_ID="${1:?Usage: $0 <test_id>}"
     BUILD_DIR="$HERE/__BUILD_DIR_NAME__"
-    OUTPUT=$(ctest --test-dir "$BUILD_DIR" -R "^${TEST_ID}$" -V --timeout 120 2>&1)
+    if [[ "$TEST_ID" == *"::"* ]]; then
+      CTEST_NAME="${TEST_ID%%::*}"
+      GTEST_FILTER="${TEST_ID#*::}"
+      OUTPUT=$("$BUILD_DIR/bin/$CTEST_NAME" --gtest_filter="$GTEST_FILTER" --gtest_color=no 2>&1)
+    else
+      OUTPUT=$(ctest --test-dir "$BUILD_DIR" -R "^${TEST_ID}$" -V --timeout 120 2>&1)
+    fi
     STATUS=$?
     echo "$OUTPUT"
-    if [[ $STATUS -ne 0 ]] || echo "$OUTPUT" | grep -q '\*\*\*Failed'; then
+    if [[ $STATUS -ne 0 ]] || echo "$OUTPUT" | grep -Eq '\*\*\*Failed|\[  FAILED  \]|Running 0 tests'; then
       exit 1
     fi
     exit 0
@@ -754,24 +1127,32 @@ def process_bug(
         return out_path
     write_run_one_test(repo)
     build_dir = repo / BUILD_DIR_NAME
-    all_tests = list_ctest_tests(build_dir)
-    selected = all_tests if run_all_tests else select_tests(all_tests, bug)
-    phase_info["all_tests"] = len(all_tests)
+    all_ctest_tests = list_ctest_tests(build_dir)
+    all_specs = discover_test_specs(build_dir, all_ctest_tests)
+    selected = all_specs if run_all_tests else select_test_specs(all_specs, bug)
+    selected_ctest_tests = sorted({spec.ctest_name for spec in selected})
+    phase_info["test_granularity"] = "gtest_case"
+    phase_info["all_ctest_tests"] = len(all_ctest_tests)
+    phase_info["selected_ctest_tests"] = len(selected_ctest_tests)
+    phase_info["all_tests"] = len(all_specs)
     phase_info["selected_tests"] = len(selected)
-    log(f"  [tests] all={len(all_tests)}, selected={len(selected)}")
+    log(
+        f"  [tests] ctest={len(all_ctest_tests)}, cases={len(all_specs)}, "
+        f"selected_cases={len(selected)}"
+    )
     if not selected:
         phase_info["errors"].append("no_tests_selected")
 
     results_a: List[TestResult] = []
-    for idx, test_name in enumerate(selected, 1):
-        passed, output = run_one_ctest(build_dir, test_name, timeout=test_timeout, asan=phase_a_asan)
+    for idx, spec in enumerate(selected, 1):
+        passed, output = run_one_test_spec(build_dir, spec, timeout=test_timeout, asan=phase_a_asan)
         results_a.append(TestResult(
-            test_id=test_name,
+            test_id=spec.test_id,
             outcome="PASS" if passed else "FAIL",
             fail_reason="" if passed else output[-3000:],
             actual_output="" if passed else output[-3000:],
         ))
-        if idx % 5 == 0 or idx == len(selected):
+        if idx % 25 == 0 or idx == len(selected):
             n_fail = sum(1 for r in results_a if r.outcome == "FAIL")
             log(f"  [phaseA-buggy] {idx}/{len(selected)} (fail={n_fail})")
 
@@ -781,10 +1162,21 @@ def process_bug(
             checkout_fixed(repo, bug)
             if compile_project(repo, jobs=jobs, asan=phase_a_asan, coverage=False):
                 fixed_build_dir = repo / BUILD_DIR_NAME
-                for idx, test_name in enumerate(selected, 1):
-                    passed, _ = run_one_ctest(fixed_build_dir, test_name, timeout=test_timeout, asan=phase_a_asan)
-                    fixed_map[test_name] = "PASS" if passed else "FAIL"
-                    if idx % 5 == 0 or idx == len(selected):
+                fixed_entries = {entry.name: entry for entry in list_ctest_entries(fixed_build_dir)}
+                fixed_selected = [
+                    TestSpec(
+                        test_id=spec.test_id,
+                        ctest_name=spec.ctest_name,
+                        command=fixed_entries.get(spec.ctest_name, CTestEntry(spec.ctest_name)).command,
+                        working_directory=fixed_entries.get(spec.ctest_name, CTestEntry(spec.ctest_name)).working_directory,
+                        gtest_filter=spec.gtest_filter,
+                    )
+                    for spec in selected
+                ]
+                for idx, spec in enumerate(fixed_selected, 1):
+                    passed, _ = run_one_test_spec(fixed_build_dir, spec, timeout=test_timeout, asan=phase_a_asan)
+                    fixed_map[spec.test_id] = "PASS" if passed else "FAIL"
+                    if idx % 25 == 0 or idx == len(selected):
                         n_fail = sum(1 for v in fixed_map.values() if v == "FAIL")
                         log(f"  [phaseA-fixed] {idx}/{len(selected)} (fail={n_fail})")
             else:
@@ -801,23 +1193,34 @@ def process_bug(
             checkout_buggy(repo, bug)
             if compile_project(repo, jobs=jobs, asan=False, coverage=True):
                 cov_build_dir = repo / BUILD_DIR_NAME
-                for idx, test_name in enumerate(selected, 1):
+                cov_entries = {entry.name: entry for entry in list_ctest_entries(cov_build_dir)}
+                cov_selected = [
+                    TestSpec(
+                        test_id=spec.test_id,
+                        ctest_name=spec.ctest_name,
+                        command=cov_entries.get(spec.ctest_name, CTestEntry(spec.ctest_name)).command,
+                        working_directory=cov_entries.get(spec.ctest_name, CTestEntry(spec.ctest_name)).working_directory,
+                        gtest_filter=spec.gtest_filter,
+                    )
+                    for spec in selected
+                ]
+                for idx, spec in enumerate(cov_selected, 1):
                     clear_gcda(cov_build_dir)
-                    run_one_ctest(cov_build_dir, test_name, timeout=test_timeout, asan=False)
+                    run_one_test_spec(cov_build_dir, spec, timeout=test_timeout, asan=False)
                     cov, cov_error = collect_coverage(repo, cov_build_dir, verbose=(idx <= 2))
-                    raw_cov_map[test_name] = coverage_to_qualified(cov)
-                    meta_cov_map[test_name] = coverage_to_qualified(filter_production_coverage(cov))
-                    cov_error_map[test_name] = cov_error
-                    if idx % 5 == 0 or idx == len(selected):
+                    raw_cov_map[spec.test_id] = coverage_to_qualified(cov)
+                    meta_cov_map[spec.test_id] = coverage_to_qualified(filter_production_coverage(cov))
+                    cov_error_map[spec.test_id] = cov_error
+                    if idx % 25 == 0 or idx == len(selected):
                         n_raw = sum(1 for v in raw_cov_map.values() if v)
                         n_meta = sum(1 for v in meta_cov_map.values() if v)
                         log(f"  [phaseB] {idx}/{len(selected)} (raw_cov={n_raw}, meta_cov={n_meta})")
             else:
                 phase_info["errors"].append("coverage_compile_failed")
-                cov_error_map.update({name: "coverage_compile_failed" for name in selected})
+                cov_error_map.update({spec.test_id: "coverage_compile_failed" for spec in selected})
         except Exception as exc:
             phase_info["errors"].append(f"coverage_phase_exception: {exc}")
-            cov_error_map.update({name: f"coverage_phase_exception: {exc}" for name in selected})
+            cov_error_map.update({spec.test_id: f"coverage_phase_exception: {exc}" for spec in selected})
             log(f"  [error] coverage phase failed: {exc}")
 
     raw_results: List[TestResult] = []

@@ -25,12 +25,14 @@ Defects4C projects:
 1. Fixed version: checkout `commit_after`.
 2. Buggy version: checkout `commit_after`, then overlay `files.src` from
    `commit_before`.
-3. Phase A: build without sanitizer by default and run CTest on buggy to
-   collect `outcome`.
+3. Phase A: build without sanitizer by default, expand CTest binaries into
+   GoogleTest test cases, and run each selected case on buggy to collect
+   `outcome`.
 4. Phase A fixed: build fixed without sanitizer by default and run the same
-   test list to collect `outcome_fixed`.
-5. Phase B: build buggy without sanitizer but with gcov flags, run tests one by one,
-   clear `.gcda` before each test, and collect `covered_functions`.
+   test case list to collect `outcome_fixed`.
+5. Phase B: build buggy without sanitizer but with gcov flags, run test cases
+   one by one, clear `.gcda` before each test case, and collect
+   `covered_functions`.
 6. Write full gcov coverage to `raw/`; write production-only coverage to
    `metadata/`.
 
@@ -39,8 +41,13 @@ harness code under `test/*` is preserved in `raw`, but removed from
 `metadata` so Unified-Debugging FL ranks production code by default.
 
 `--jobs 4` only controls Ninja build parallelism. Tests and coverage collection
-still run sequentially to avoid `.gcda` files from different tests overwriting
-each other.
+still run sequentially to avoid `.gcda` files from different test cases
+overwriting each other.
+
+For GoogleTest binaries, metadata `test_id` values use
+`<ctest-binary>::<Suite>.<Case>`, for example
+`format-test::FormatterTest.NamedArg`. Non-GoogleTest CTest entries fall back to
+their CTest name.
 
 Use `--phase-a-asan` only when you explicitly want ASAN/UBSAN labels. The
 default `--phase-a-plain` is recommended for fmt because several historical
@@ -125,7 +132,17 @@ docker exec my_defects4c_fmt bash -lc '
 '
 ```
 
-Debug faster with only test names from `c_compile.test_flags`:
+`--skip-if-exists` chỉ kiểm tra file output đã tồn tại. Nếu vừa sửa logic
+extract ground truth/coverage parser, hãy xóa metadata/raw cũ của `fmt` trước
+khi chạy lại để tránh giữ kết quả cũ:
+
+```bash
+rm -rf defects4c/out_tmp_dirs/unified_debugging/fmt/metadata
+rm -rf defects4c/out_tmp_dirs/unified_debugging/fmt/raw
+```
+
+Debug faster with only test binaries from `c_compile.test_flags`, expanded to
+their individual GoogleTest cases:
 
 ```bash
 docker exec my_defects4c_fmt bash -lc '

@@ -26,6 +26,8 @@ PROJECT_NAME = PROJECT_DIR.name
 BUGS_JSON = PROJECT_DIR / "bugs_list_new.json"
 REMOTE_URL = "https://github.com/CESNET/libyang.git"
 BUILD_DIR_NAME = "build_meta_libyang"
+BUILD_META_CMOCKA_FILTER_ENV = "BUILD_META_CMOCKA_TEST_FILTER"
+COVERAGE_PARSER_VERSION = 2
 
 COV_CFLAGS = "-g -O0 -fprofile-arcs -ftest-coverage -Wno-error"
 COV_LDFLAGS = "-fprofile-arcs -ftest-coverage -lgcov"
@@ -47,14 +49,25 @@ def _parse_gcov_functions(text: str) -> List[str]:
     funcs = []
     for m in _GCOV_FUNC_RE_NEW.finditer(text):
         try:
-            if float(m.group("pct")) > 0.0: funcs.append(m.group("name"))
+            if float(m.group("pct")) > 0.0: funcs.append(_normalize_c_function(m.group("name")))
         except ValueError: pass
     if funcs: return funcs
     for m in _GCOV_FUNC_RE_OLD.finditer(text):
         try:
-            if int(m.group("calls")) > 0: funcs.append(m.group("name"))
+            if int(m.group("calls")) > 0: funcs.append(_normalize_c_function(m.group("name")))
         except ValueError: pass
-    return funcs
+    return [f for f in funcs if f]
+
+def _normalize_c_function(name: str) -> str:
+    name = re.sub(r"\s+", " ", str(name)).strip()
+    if not name:
+        return ""
+    if "(" in name:
+        name = name.split("(", 1)[0].strip()
+    name = re.sub(r"^(static|extern|inline|const|volatile)\s+", "", name)
+    if " " in name:
+        name = name.rsplit(" ", 1)[-1]
+    return name.strip("* ")
 
 # ── Helpers ──
 def _safe_exists(p: Path) -> bool:
@@ -135,6 +148,20 @@ class TestResult:
     actual_output: str = ""; covered_functions: List[str] = field(default_factory=list)
     coverage_error: str = ""
 
+@dataclass
+class CTestEntry:
+    name: str
+    command: List[str] = field(default_factory=list)
+    environment: Dict[str, str] = field(default_factory=dict)
+
+@dataclass
+class TestSpec:
+    test_id: str
+    ctest_name: str
+    case_name: str = ""
+    command: List[str] = field(default_factory=list)
+    environment: Dict[str, str] = field(default_factory=dict)
+
 # ── Load bugs ──
 def load_bugs() -> List[BugEntry]:
     data = json.loads(BUGS_JSON.read_text())
@@ -189,8 +216,46 @@ def checkout_buggy(repo, bug):
 def checkout_fixed(repo, bug):
     _git_checkout(repo, bug.sha_after, "fixed")
 
+def apply_cmocka_filter_patch(repo: Path) -> int:
+    """Make libyang CMocka test binaries filterable per test case.
+
+    libyang registers only one CTest entry per CMocka binary. CMocka supports
+    filtering through cmocka_set_test_filter(), but these historical binaries do
+    not expose it. This build-only patch wires an env var to that API.
+    """
+    patched = 0
+    marker = "BUILD_META_CMOCKA_TEST_FILTER"
+    for path in sorted((repo / "tests").rglob("*.c")):
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        if "cmocka_run_group_tests" not in text or marker in text:
+            continue
+        new_text = text
+        if "#include <cmocka.h>" in new_text and "#include <stdlib.h>" not in new_text:
+            new_text = new_text.replace("#include <cmocka.h>", "#include <cmocka.h>\n#include <stdlib.h>", 1)
+        hook = (
+            "{\n"
+            f"        const char *build_meta_filter = getenv(\"{BUILD_META_CMOCKA_FILTER_ENV}\");\n"
+            "        if (build_meta_filter && build_meta_filter[0]) {\n"
+            "            cmocka_set_test_filter(build_meta_filter);\n"
+            "        }\n"
+            "    }\n"
+            "    return cmocka_run_group_tests("
+        )
+        new_text = new_text.replace("return cmocka_run_group_tests(", hook, 1)
+        if new_text != text:
+            path.write_text(new_text, encoding="utf-8")
+            patched += 1
+    return patched
+
 # ── CMake build ──
 def compile_with_coverage(repo, *, jobs, timeout=1800, asan=False) -> bool:
+    patched = apply_cmocka_filter_patch(repo)
+    if patched:
+        log(f"  [build-compat] cmocka filter patch applied to {patched} file(s)")
+
     env = os.environ.copy()
     cflags = COV_CFLAGS
     ldflags = COV_LDFLAGS
@@ -239,16 +304,42 @@ def compile_with_coverage(repo, *, jobs, timeout=1800, asan=False) -> bool:
     return True
 
 # ── CTest operations ──
-def list_ctest_tests(build_dir: Path) -> List[str]:
-    """Lấy danh sách test name từ CTest, ưu tiên JSON để tránh lệch format."""
+def _parse_ctest_environment(value) -> Dict[str, str]:
+    if not value:
+        return {}
+    items = value if isinstance(value, list) else [value]
+    env: Dict[str, str] = {}
+    for item in items:
+        for part in str(item).split(";"):
+            if "=" in part:
+                key, val = part.split("=", 1)
+                if key:
+                    env[key] = val
+    return env
+
+def list_ctest_entries(build_dir: Path) -> List[CTestEntry]:
+    """Lấy danh sách CTest entries kèm command/env, ưu tiên JSON."""
     rc, out, err = run(["ctest", "--test-dir", str(build_dir), "--show-only=json-v1"],
                        cwd=build_dir, timeout=60)
     if rc == 0:
         try:
             payload = json.loads(out)
-            names = [t.get("name") for t in payload.get("tests", []) if t.get("name")]
-            if names:
-                return names
+            entries: List[CTestEntry] = []
+            for test in payload.get("tests", []):
+                name = test.get("name")
+                if not name:
+                    continue
+                env: Dict[str, str] = {}
+                for prop in test.get("properties", []) or []:
+                    if prop.get("name") == "ENVIRONMENT":
+                        env.update(_parse_ctest_environment(prop.get("value")))
+                entries.append(CTestEntry(
+                    name=name,
+                    command=[str(arg) for arg in (test.get("command") or [])],
+                    environment=env,
+                ))
+            if entries:
+                return entries
         except json.JSONDecodeError as exc:
             log(f"  [tests] ctest json parse failed: {exc}")
 
@@ -263,7 +354,82 @@ def list_ctest_tests(build_dir: Path) -> List[str]:
         # format: "Test #N: test_name"
         m = re.match(r"Test\s+#?\d+:\s+(\S+)", line)
         if m: names.append(m.group(1))
-    return names
+    return [CTestEntry(name=name) for name in names]
+
+def list_ctest_tests(build_dir: Path) -> List[str]:
+    return [entry.name for entry in list_ctest_entries(build_dir)]
+
+def _candidate_ctest_names_for_source(path: Path) -> List[str]:
+    stem = path.stem
+    names = []
+    if stem.startswith("test_"):
+        names.append(stem[len("test_"):])
+    names.append(stem)
+    out = []
+    for name in names:
+        out.extend([name, f"src_{name}", f"utest_{name}"])
+    return out
+
+def _parse_cmocka_cases(source_text: str) -> List[str]:
+    cases = []
+    seen = set()
+    pattern = re.compile(
+        r"\b(?:cmocka_unit_test(?:_setup(?:_teardown)?|_teardown)?|UTEST)\s*\(\s*(?P<name>[A-Za-z_]\w*)",
+        re.MULTILINE,
+    )
+    for match in pattern.finditer(source_text):
+        name = match.group("name")
+        if name not in seen:
+            seen.add(name)
+            cases.append(name)
+    return cases
+
+def discover_cmocka_cases(repo: Path) -> Dict[str, List[str]]:
+    by_ctest: Dict[str, List[str]] = {}
+    tests_dir = repo / "tests"
+    if not tests_dir.exists():
+        return by_ctest
+    for path in sorted(tests_dir.rglob("*.c")):
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        if "cmocka_run_group_tests" not in text:
+            continue
+        cases = _parse_cmocka_cases(text)
+        if not cases:
+            continue
+        for name in _candidate_ctest_names_for_source(path):
+            by_ctest.setdefault(name, [])
+            by_ctest[name].extend(cases)
+    for name in list(by_ctest.keys()):
+        by_ctest[name] = sorted(dict.fromkeys(by_ctest[name]))
+    return by_ctest
+
+def discover_test_specs(repo: Path, build_dir: Path, ctest_names: List[str]) -> List[TestSpec]:
+    entries = {entry.name: entry for entry in list_ctest_entries(build_dir)}
+    cmocka_cases = discover_cmocka_cases(repo)
+    specs: List[TestSpec] = []
+    for ctest_name in ctest_names:
+        entry = entries.get(ctest_name) or CTestEntry(name=ctest_name)
+        cases = cmocka_cases.get(ctest_name, [])
+        if not cases:
+            specs.append(TestSpec(
+                test_id=ctest_name,
+                ctest_name=ctest_name,
+                command=entry.command,
+                environment=entry.environment,
+            ))
+            continue
+        for case_name in cases:
+            specs.append(TestSpec(
+                test_id=f"{ctest_name}::{case_name}",
+                ctest_name=ctest_name,
+                case_name=case_name,
+                command=entry.command,
+                environment=entry.environment,
+            ))
+    return specs
 
 def select_tests(all_tests: List[str], bug: BugEntry) -> List[str]:
     """Chọn test dựa trên test_flags từ bugs_list_new.json."""
@@ -278,6 +444,25 @@ def select_tests(all_tests: List[str], bug: BugEntry) -> List[str]:
                     if t not in selected: selected.append(t)
     # Luôn giữ tất cả test nếu test_flags không match được gì
     return selected if selected else all_tests
+
+def select_test_specs(all_specs: List[TestSpec], bug: BugEntry) -> List[TestSpec]:
+    if not bug.test_flags:
+        return all_specs
+    selected: List[TestSpec] = []
+    seen = set()
+    for tf in bug.test_flags:
+        patterns = [p.strip() for p in tf.split("|") if p.strip()]
+        for pat in patterns:
+            regex = pat.replace("*", ".*")
+            for spec in all_specs:
+                candidates = [spec.test_id, spec.ctest_name]
+                if spec.case_name:
+                    candidates.append(spec.case_name)
+                if any(candidate == pat or candidate.startswith(f"{pat}::") or re.match(regex, candidate) for candidate in candidates):
+                    if spec.test_id not in seen:
+                        selected.append(spec)
+                        seen.add(spec.test_id)
+    return selected if selected else all_specs
 
 def clear_gcda(path: Path):
     for g in path.rglob("*.gcda"):
@@ -298,6 +483,24 @@ def run_one_ctest(build_dir: Path, test_name: str, timeout=120) -> Tuple[bool, s
                             or "1 test passed" in combined)
     if rc == 0 and "0 tests" not in combined: passed = True
     if "***Failed" in combined or "***Timeout" in combined: passed = False
+    return passed, combined
+
+def run_one_test_spec(build_dir: Path, spec: TestSpec, timeout=120) -> Tuple[bool, str]:
+    if not spec.case_name:
+        return run_one_ctest(build_dir, spec.ctest_name, timeout=timeout)
+
+    env = os.environ.copy()
+    env.setdefault("ASAN_OPTIONS", "detect_leaks=0:abort_on_error=0")
+    env.update(spec.environment)
+    env[BUILD_META_CMOCKA_FILTER_ENV] = spec.case_name
+    command = spec.command or [str(build_dir / "tests" / spec.ctest_name)]
+    rc, out, err = run(command, cwd=build_dir, env=env, timeout=timeout + 30)
+    combined = (out or "") + ("\n" + err if err else "")
+    passed = rc == 0
+    if "[  FAILED  ]" in combined or "FAILED TEST(S)" in combined or "***Failed" in combined or "***Timeout" in combined:
+        passed = False
+    if re.search(r"Running\s+0\s+test|0 test\(s\) run", combined):
+        passed = False
     return passed, combined
 
 # ── Coverage collection ──
@@ -502,10 +705,16 @@ RUN_ONE_TEST_SH = textwrap.dedent(r"""
     HERE=$(cd "$(dirname "$0")" && pwd)
     TEST_ID="${1:?Usage: $0 <test_id>}"
     BUILD_DIR="$HERE/__BUILD_DIR_NAME__"
-    OUTPUT=$(ctest --test-dir "$BUILD_DIR" -R "^${TEST_ID}$" -V --timeout 120 2>&1)
+    if [[ "$TEST_ID" == *"::"* ]]; then
+      CTEST_NAME="${TEST_ID%%::*}"
+      CASE_NAME="${TEST_ID#*::}"
+      OUTPUT=$(BUILD_META_CMOCKA_TEST_FILTER="$CASE_NAME" "$BUILD_DIR/tests/$CTEST_NAME" 2>&1)
+    else
+      OUTPUT=$(ctest --test-dir "$BUILD_DIR" -R "^${TEST_ID}$" -V --timeout 120 2>&1)
+    fi
     STATUS=$?
     echo "$OUTPUT"
-    if [[ $STATUS -ne 0 ]] || echo "$OUTPUT" | grep -q '***Failed'; then
+    if [[ $STATUS -ne 0 ]] || echo "$OUTPUT" | grep -Eq '\*\*\*Failed|\[  FAILED  \]|FAILED TEST\(S\)|Running 0 test|0 test\(s\) run'; then
       exit 1
     fi
     exit 0
@@ -529,6 +738,23 @@ def _test_to_dict(r):
         item["coverage_error"] = r.coverage_error
     return item
 
+def _existing_metadata_is_current(path: Path, *, require_coverage: bool) -> bool:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    phase_info = data.get("phase_info") or {}
+    tests = data.get("tests") or []
+    if not tests or data.get("build_error"):
+        return False
+    if phase_info.get("test_granularity") != "cmocka_case":
+        return False
+    if int(phase_info.get("coverage_parser_version") or 0) != COVERAGE_PARSER_VERSION:
+        return False
+    if require_coverage and phase_info.get("skip_coverage"):
+        return False
+    return True
+
 # ── Main processing ──
 def process_bug(bug, out_root, metadata_dir, raw_dir, *, jobs, test_timeout,
                 skip_if_exists, clone_if_missing, skip_coverage, dual_run, run_all_tests=False):
@@ -537,7 +763,9 @@ def process_bug(bug, out_root, metadata_dir, raw_dir, *, jobs, test_timeout,
     raw_out_path = raw_dir / safe_name
 
     if skip_if_exists and out_path.exists():
-        log(f"[skip] {bug.bug_id}"); return out_path
+        if _existing_metadata_is_current(out_path, require_coverage=not skip_coverage):
+            log(f"[skip] {bug.bug_id}"); return out_path
+        log(f"[rerun] {bug.bug_id} existing metadata is suite-level/old")
 
     log(f"=== {bug.bug_id} | {bug.type_name or ''} ===")
     try: repo = ensure_repo(out_root, bug.sha_after, clone_if_missing=clone_if_missing)
@@ -567,14 +795,20 @@ def process_bug(bug, out_root, metadata_dir, raw_dir, *, jobs, test_timeout,
         return out_path
 
     write_run_one_test(repo)
-    all_tests = list_ctest_tests(build_dir)
-    selected = all_tests if run_all_tests else select_tests(all_tests, bug)
-    log(f"  [tests] all={len(all_tests)}, selected={len(selected)}")
+    all_ctest_tests = list_ctest_tests(build_dir)
+    all_specs = discover_test_specs(repo, build_dir, all_ctest_tests)
+    selected = all_specs if run_all_tests else select_test_specs(all_specs, bug)
+    selected_ctest_tests = sorted({spec.ctest_name for spec in selected})
+    log(f"  [tests] ctest={len(all_ctest_tests)}, cases={len(all_specs)}, selected_cases={len(selected)}")
     phase_info = {
         "run_all_tests": run_all_tests,
         "dual_run": dual_run,
         "skip_coverage": skip_coverage,
-        "all_tests": len(all_tests),
+        "test_granularity": "cmocka_case",
+        "coverage_parser_version": COVERAGE_PARSER_VERSION,
+        "all_ctest_tests": len(all_ctest_tests),
+        "selected_ctest_tests": len(selected_ctest_tests),
+        "all_tests": len(all_specs),
         "selected_tests": len(selected),
         "errors": [],
     }
@@ -584,14 +818,14 @@ def process_bug(bug, out_root, metadata_dir, raw_dir, *, jobs, test_timeout,
     if dual_run:
         # Phase A: buggy outcomes
         results_a = []
-        for idx, tn in enumerate(selected, 1):
-            passed, output = run_one_ctest(build_dir, tn, timeout=test_timeout)
+        for idx, spec in enumerate(selected, 1):
+            passed, output = run_one_test_spec(build_dir, spec, timeout=test_timeout)
             results_a.append(TestResult(
-                test_id=tn, outcome="PASS" if passed else "FAIL",
+                test_id=spec.test_id, outcome="PASS" if passed else "FAIL",
                 fail_reason="" if passed else output[-3000:],
                 actual_output="" if passed else output[-3000:],
             ))
-            if idx % 5 == 0 or idx == len(selected):
+            if idx % 25 == 0 or idx == len(selected):
                 nf = sum(1 for r in results_a if r.outcome == "FAIL")
                 log(f"  [phaseA-buggy] {idx}/{len(selected)} (fail={nf})")
 
@@ -600,10 +834,21 @@ def process_bug(bug, out_root, metadata_dir, raw_dir, *, jobs, test_timeout,
         try:
             checkout_fixed(repo, bug)
             if compile_with_coverage(repo, jobs=jobs):
-                for idx, tn in enumerate(selected, 1):
-                    passed, _ = run_one_ctest(build_dir, tn, timeout=test_timeout)
-                    fixed_map[tn] = "PASS" if passed else "FAIL"
-                    if idx % 5 == 0 or idx == len(selected):
+                fixed_entries = {entry.name: entry for entry in list_ctest_entries(build_dir)}
+                fixed_selected = [
+                    TestSpec(
+                        test_id=spec.test_id,
+                        ctest_name=spec.ctest_name,
+                        case_name=spec.case_name,
+                        command=(fixed_entries.get(spec.ctest_name) or CTestEntry(spec.ctest_name)).command,
+                        environment=(fixed_entries.get(spec.ctest_name) or CTestEntry(spec.ctest_name)).environment,
+                    )
+                    for spec in selected
+                ]
+                for idx, spec in enumerate(fixed_selected, 1):
+                    passed, _ = run_one_test_spec(build_dir, spec, timeout=test_timeout)
+                    fixed_map[spec.test_id] = "PASS" if passed else "FAIL"
+                    if idx % 25 == 0 or idx == len(selected):
                         nf = sum(1 for v in fixed_map.values() if v == 'FAIL')
                         log(f"  [phaseA-fixed] {idx}/{len(selected)} (fail={nf})")
                 log(f"  [phaseA-fixed] done (fail={sum(1 for v in fixed_map.values() if v=='FAIL')})")
@@ -622,24 +867,34 @@ def process_bug(bug, out_root, metadata_dir, raw_dir, *, jobs, test_timeout,
             try:
                 checkout_buggy(repo, bug)
                 if compile_with_coverage(repo, jobs=jobs):
-                    phase_b_tests = selected  # chạy toàn bộ để lấy coverage
-                    for idx, tn in enumerate(phase_b_tests, 1):
+                    cov_entries = {entry.name: entry for entry in list_ctest_entries(build_dir)}
+                    phase_b_tests = [
+                        TestSpec(
+                            test_id=spec.test_id,
+                            ctest_name=spec.ctest_name,
+                            case_name=spec.case_name,
+                            command=(cov_entries.get(spec.ctest_name) or CTestEntry(spec.ctest_name)).command,
+                            environment=(cov_entries.get(spec.ctest_name) or CTestEntry(spec.ctest_name)).environment,
+                        )
+                        for spec in selected
+                    ]
+                    for idx, spec in enumerate(phase_b_tests, 1):
                         clear_gcda(build_dir)
-                        run_one_ctest(build_dir, tn, timeout=test_timeout)
+                        run_one_test_spec(build_dir, spec, timeout=test_timeout)
                         cov, cov_error = collect_coverage(repo, build_dir, verbose=(idx <= 2))
-                        raw_cov_map[tn] = coverage_to_qualified(cov)
-                        meta_cov_map[tn] = coverage_to_qualified(filter_production_coverage(cov))
-                        cov_error_map[tn] = cov_error
-                        if idx % 5 == 0 or idx == len(phase_b_tests):
+                        raw_cov_map[spec.test_id] = coverage_to_qualified(cov)
+                        meta_cov_map[spec.test_id] = coverage_to_qualified(filter_production_coverage(cov))
+                        cov_error_map[spec.test_id] = cov_error
+                        if idx % 25 == 0 or idx == len(phase_b_tests):
                             n_raw = sum(1 for v in raw_cov_map.values() if v)
                             n_meta = sum(1 for v in meta_cov_map.values() if v)
                             log(f"  [phaseB] {idx}/{len(phase_b_tests)} (raw_cov={n_raw}, meta_cov={n_meta})")
                 else:
                     phase_info["errors"].append("coverage_compile_failed")
-                    cov_error_map.update({tn: "coverage_compile_failed" for tn in selected})
+                    cov_error_map.update({spec.test_id: "coverage_compile_failed" for spec in selected})
             except Exception as e:
                 phase_info["errors"].append(f"coverage_phase_exception: {e}")
-                cov_error_map.update({tn: f"coverage_phase_exception: {e}" for tn in selected})
+                cov_error_map.update({spec.test_id: f"coverage_phase_exception: {e}" for spec in selected})
                 log(f"  [error] phaseB failed: {e}")
 
         raw_results = []
@@ -667,12 +922,12 @@ def process_bug(bug, out_root, metadata_dir, raw_dir, *, jobs, test_timeout,
         # Single-phase
         raw_results_for_record = []
         results = []
-        for idx, tn in enumerate(selected, 1):
+        for idx, spec in enumerate(selected, 1):
             clear_gcda(build_dir)
-            passed, output = run_one_ctest(build_dir, tn, timeout=test_timeout)
+            passed, output = run_one_test_spec(build_dir, spec, timeout=test_timeout)
             cov, cov_error = ({}, "") if skip_coverage else collect_coverage(repo, build_dir)
             raw_results_for_record.append(TestResult(
-                test_id=tn, outcome="PASS" if passed else "FAIL",
+                test_id=spec.test_id, outcome="PASS" if passed else "FAIL",
                 outcome_fixed="NOT_RUN",
                 fail_reason="" if passed else output[-3000:],
                 actual_output="" if passed else output[-3000:],
@@ -680,7 +935,7 @@ def process_bug(bug, out_root, metadata_dir, raw_dir, *, jobs, test_timeout,
                 coverage_error=cov_error,
             ))
             results.append(TestResult(
-                test_id=tn, outcome="PASS" if passed else "FAIL",
+                test_id=spec.test_id, outcome="PASS" if passed else "FAIL",
                 outcome_fixed="NOT_RUN",
                 fail_reason="" if passed else output[-3000:],
                 actual_output="" if passed else output[-3000:],
