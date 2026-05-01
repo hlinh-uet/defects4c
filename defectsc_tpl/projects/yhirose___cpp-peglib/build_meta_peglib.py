@@ -100,6 +100,7 @@ class TestEntry:
     test_id: str
     executable_relpath: str
     source_relpath: str = ""
+    test_name: str = ""
     command: List[str] = field(default_factory=list)
     working_dir_relpath: str = "."
 
@@ -108,6 +109,7 @@ class TestEntry:
 class TestResult:
     test_id: str
     outcome: str
+    test_name: str = ""
     outcome_fixed: str = ""
     fail_reason: str = ""
     actual_output: str = ""
@@ -390,6 +392,54 @@ def checkout_commit(repo_dir: Path, sha: str) -> None:
     run(["git", "checkout", "--force", sha], cwd=repo_dir, check=True)
 
 
+def _assert_head(repo_dir: Path, expected_sha: str, label: str) -> None:
+    rc, out, err = run(["git", "rev-parse", "HEAD"], cwd=repo_dir, capture=True)
+    if rc != 0:
+        raise RuntimeError(f"Cannot read git HEAD for {label}: {(out + err)[-1000:]}")
+    actual = out.strip()
+    if actual != expected_sha:
+        raise RuntimeError(
+            f"{label} checkout invariant failed: HEAD={actual}, expected={expected_sha}"
+        )
+
+
+def _assert_paths_match_commit(
+    repo_dir: Path,
+    commit_sha: str,
+    paths: List[str],
+    label: str,
+) -> None:
+    if not paths:
+        return
+    rc, out, err = run(
+        ["git", "diff", "--quiet", commit_sha, "--", *paths],
+        cwd=repo_dir,
+        capture=True,
+    )
+    if rc != 0:
+        rc2, diff_out, diff_err = run(
+            ["git", "diff", "--", commit_sha, "--", *paths],
+            cwd=repo_dir,
+            capture=True,
+        )
+        raise RuntimeError(
+            f"{label} checkout invariant failed: paths do not match {commit_sha}\n"
+            f"{(diff_out + diff_err or out + err)[-2000:]}"
+        )
+
+
+def assert_fixed_tree(repo_dir: Path, bug: BugEntry) -> None:
+    _assert_head(repo_dir, bug.sha_after, "fixed")
+    _assert_paths_match_commit(repo_dir, bug.sha_after, bug.src_files, "fixed src")
+    _assert_paths_match_commit(repo_dir, bug.sha_after, bug.test_files, "fixed tests")
+
+
+def assert_buggy_tree(repo_dir: Path, bug: BugEntry) -> None:
+    _assert_head(repo_dir, bug.sha_after, "buggy fixed-base")
+    _assert_paths_match_commit(repo_dir, bug.sha_before, bug.src_files, "buggy src overlay")
+    _assert_paths_match_commit(repo_dir, bug.sha_after, bug.test_files, "buggy fixed-tree tests")
+
+
 def checkout_buggy(repo_dir: Path, bug: BugEntry) -> None:
     checkout_commit(repo_dir, bug.sha_after)
     if bug.sha_before and bug.src_files:
@@ -398,10 +448,12 @@ def checkout_buggy(repo_dir: Path, bug: BugEntry) -> None:
             cwd=repo_dir,
             check=True,
         )
+    assert_buggy_tree(repo_dir, bug)
 
 
 def checkout_fixed(repo_dir: Path, bug: BugEntry) -> None:
     checkout_commit(repo_dir, bug.sha_after)
+    assert_fixed_tree(repo_dir, bug)
 
 
 def _build_flags(*, asan: bool, coverage: bool) -> Tuple[str, str, str]:
@@ -510,6 +562,10 @@ def _relpath_if_possible(path_str: str, repo_dir: Path) -> str:
         return path_str
 
 
+def _test_id_from_name(index: int, name: str) -> str:
+    return f"catch_{index:03d}_{_safe_label(name)}"
+
+
 def _discover_tests_from_ctest(repo_dir: Path) -> List[TestEntry]:
     build_dir = repo_dir / BUILD_DIR_NAME
     if not which("ctest") or not build_dir.exists():
@@ -546,6 +602,7 @@ def _discover_tests_from_ctest(repo_dir: Path) -> List[TestEntry]:
                 test_id=name,
                 executable_relpath=executable_rel,
                 source_relpath="test/test1.cc",
+                test_name=name,
                 command=command,
                 working_dir_relpath=_relpath_if_possible(str(workdir), repo_dir),
             )
@@ -553,21 +610,74 @@ def _discover_tests_from_ctest(repo_dir: Path) -> List[TestEntry]:
     return entries
 
 
+def _discover_catch_tests_from_binary(repo_dir: Path, base_entry: TestEntry) -> List[TestEntry]:
+    exe = repo_dir / base_entry.executable_relpath
+    if not exe.exists():
+        return []
+    workdir_rel = base_entry.working_dir_relpath or "."
+    workdir = repo_dir / workdir_rel
+    if not workdir.exists():
+        workdir = repo_dir
+
+    rc, out, err = run(
+        [str(exe), "--list-test-names-only"],
+        cwd=workdir,
+        capture=True,
+        timeout=60,
+    )
+    names = []
+    seen = set()
+    for line in out.splitlines():
+        name = line.strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+
+    # Catch v2.2.2 returns the number of listed tests for this command in this
+    # project. Treat non-empty stdout as successful discovery.
+    if rc != 0 and not names:
+        log(f"  [tests] Catch test listing failed rc={rc}\n{(out + err)[-1500:]}")
+        return []
+
+    entries: List[TestEntry] = []
+    for idx, name in enumerate(names, 1):
+        entries.append(
+            TestEntry(
+                test_id=_test_id_from_name(idx, name),
+                executable_relpath=base_entry.executable_relpath,
+                source_relpath=base_entry.source_relpath,
+                test_name=name,
+                command=[str(exe), name],
+                working_dir_relpath=workdir_rel,
+            )
+        )
+    return entries
+
+
 def discover_tests(repo_dir: Path, bug: BugEntry) -> List[TestEntry]:
     build_dir = repo_dir / BUILD_DIR_NAME
-    tests = _discover_tests_from_ctest(repo_dir)
-    if not tests:
+    ctest_entries = _discover_tests_from_ctest(repo_dir)
+    tests = _discover_catch_tests_from_binary(repo_dir, ctest_entries[0]) if ctest_entries else []
+    if tests:
+        log(f"  [tests] discovered {len(tests)} Catch test case(s)")
+    else:
         exe = build_dir / "test" / "test-main"
         if exe.exists():
-            tests = [
-                TestEntry(
-                    test_id="test-main",
-                    executable_relpath=f"{BUILD_DIR_NAME}/test/test-main",
-                    source_relpath=(bug.test_files[0] if bug.test_files else "test/test1.cc"),
-                    command=[str(exe)],
-                    working_dir_relpath=f"{BUILD_DIR_NAME}/test",
-                )
-            ]
+            base_entry = TestEntry(
+                test_id="TestMain",
+                executable_relpath=f"{BUILD_DIR_NAME}/test/test-main",
+                source_relpath=(bug.test_files[0] if bug.test_files else "test/test1.cc"),
+                test_name="TestMain",
+                command=[str(exe)],
+                working_dir_relpath=f"{BUILD_DIR_NAME}/test",
+            )
+            tests = _discover_catch_tests_from_binary(repo_dir, base_entry)
+    if not tests:
+        raise RuntimeError(
+            "Cannot discover individual Catch test cases from test/test-main. "
+            "Refusing to generate aggregate TestMain-only metadata."
+        )
 
     existing: List[TestEntry] = []
     for te in tests:
@@ -691,6 +801,7 @@ def run_tests(
                 json.dumps(
                     {
                         "test_id": te.test_id,
+                        "test_name": te.test_name,
                         "command": te.command or [str(repo_dir / te.executable_relpath)],
                         "working_dir": str(repo_dir / te.working_dir_relpath),
                         "outcome": "PASS" if passed else "FAIL",
@@ -707,6 +818,7 @@ def run_tests(
             TestResult(
                 test_id=te.test_id,
                 outcome="PASS" if passed else "FAIL",
+                test_name=te.test_name,
                 fail_reason="" if passed else reason,
                 actual_output="" if passed else combined_output[-4000:],
                 expected_output="",
@@ -1013,7 +1125,12 @@ def _existing_output_is_complete(path: Path) -> bool:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
-    return not payload.get("build_error")
+    if payload.get("build_error"):
+        return False
+    tests = payload.get("tests") or []
+    if len(tests) <= 1 and (tests[0].get("test_id") if tests else "") in {"TestMain", "test-main"}:
+        return False
+    return True
 
 
 def _empty_record(bug: BugEntry, repo_dir: Path, compile_cmd: str, *, error: str) -> dict:
@@ -1096,6 +1213,8 @@ def process_bug(
 
     compile_cmd = _compile_cmd_for_meta(repo_dir, jobs=jobs)
     if debug_bug_dir:
+        if debug_bug_dir.exists():
+            shutil.rmtree(debug_bug_dir)
         _write_text(
             debug_bug_dir / "00_bug.json",
             json.dumps(
@@ -1138,7 +1257,9 @@ def process_bug(
         phase_info: Dict[str, object] = {
             "mode": "dual",
             "phase_b_scope": gcov_scope if not skip_coverage else "skip_coverage",
-            "test_policy": "fixed_tree_test_main_for_buggy_and_fixed",
+            "version_policy": "fixed=commit_after; buggy=commit_after_with_files.src_from_commit_before",
+            "checkout_invariants": "asserted_before_each_build",
+            "test_policy": "fixed_tree_catch_tests_for_buggy_and_fixed",
             "coverage_build": "non_asan_gcov",
             "final_build": "asan_buggy",
         }
@@ -1157,6 +1278,11 @@ def process_bug(
             _write_meta(out_path, record)
             return out_path
         entries = discover_tests(repo_dir, bug)
+        phase_info["test_discovery"] = {
+            "runner": "catch",
+            "scope": "individual_test_cases",
+            "count": len(entries),
+        }
         write_run_one_test(repo_dir, entries)
         results_a, _ = run_tests(
             repo_dir,
@@ -1265,6 +1391,7 @@ def process_bug(
             TestResult(
                 test_id=r.test_id,
                 outcome=r.outcome,
+                test_name=r.test_name,
                 outcome_fixed=fixed_outcome_by_test.get(r.test_id, ""),
                 fail_reason=r.fail_reason,
                 actual_output=r.actual_output,
@@ -1277,7 +1404,9 @@ def process_bug(
     else:
         phase_info = {
             "mode": "single",
-            "test_policy": "fixed_tree_test_main",
+            "version_policy": "fixed=commit_after; buggy=commit_after_with_files.src_from_commit_before",
+            "checkout_invariants": "asserted_before_build",
+            "test_policy": "fixed_tree_catch_tests",
         }
         if not compile_peglib(
             repo_dir,

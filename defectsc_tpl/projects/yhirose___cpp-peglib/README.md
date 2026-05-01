@@ -27,17 +27,24 @@ The metadata and raw JSON contents are intentionally identical.
 For each bug:
 
 1. Checkout fixed tree at `commit_after`.
-2. Create buggy tree by overlaying only `files.src` from `commit_before`.
-3. Phase A builds with ASAN and runs `test/test-main` on buggy.
-4. Phase A checks out fixed, rebuilds with ASAN, and reruns the same test to fill `outcome_fixed`.
+2. Create buggy tree by keeping `HEAD` at `commit_after` and overlaying only `files.src` from `commit_before`.
+3. Phase A builds with ASAN, lists Catch test cases from `test/test-main --list-test-names-only`, and runs each test case separately on buggy.
+4. Phase A checks out fixed, rebuilds with ASAN, and reruns the same per-test list to fill `outcome_fixed`.
 5. Phase B checks out buggy again, rebuilds with GCOV and no ASAN, and records `covered_functions`.
 6. The script rebuilds buggy ASAN at the end so `test_cmd_template` can reproduce the failing oracle.
+
+The script asserts these checkout invariants before every build:
+
+| Tree | Required state |
+|---|---|
+| Fixed | `HEAD == commit_after`, `files.src` and `files.test` match `commit_after`. |
+| Buggy | `HEAD == commit_after`, `files.src` matches `commit_before`, `files.test` still matches `commit_after`. |
 
 Expected related test for the current bug:
 
 | bug_id | buggy outcome | fixed outcome | runner |
 |---|---|---|---|
-| `CVE-2020-23915` | `FAIL` | `PASS` | `test-main` built from `test/test1.cc` |
+| `CVE-2020-23915` | `FAIL` | `PASS` | `catch_005_Invalid_UTF-8_text_test` |
 
 The ground-truth function should be extracted as `codepoint_length` from the
 patch hunk in `peglib.h`.
@@ -91,7 +98,8 @@ docker exec my_defects4c_peglib bash -lc '
     --metadata-dir /out/unified_debugging/peglib/metadata \
     --raw-dir /out/unified_debugging/peglib/raw \
     --dual-run \
-    --gcov-scope all
+    --gcov-scope all \
+    --label-retries 8
 '
 ```
 
@@ -105,6 +113,7 @@ docker exec my_defects4c_peglib bash -lc '
     --raw-dir /out/unified_debugging/peglib/raw \
     --dual-run \
     --gcov-scope all \
+    --label-retries 8 \
     --skip-if-exists
 '
 ```
@@ -123,9 +132,9 @@ Checklist:
 | Check | Expected |
 |---|---|
 | `bug_id` | `CVE-2020-23915` |
-| `tests[0].outcome` | `FAIL` |
-| `tests[0].outcome_fixed` | `PASS` |
-| `tests[0].covered_functions` | Non-empty, preferably includes `peglib.h:*` functions |
+| `tests` | Contains all Catch test cases, not only `TestMain`. |
+| triggering test | `catch_005_Invalid_UTF-8_text_test` has `outcome=FAIL`, `outcome_fixed=PASS`. |
+| `tests[*].covered_functions` | Non-empty for Phase B runs, preferably includes `peglib.h:*` functions. |
 | `ground_truth_functions` | Includes `codepoint_length` |
 | `test_cmd_template` | Points to `/out/yhirose___cpp-peglib/git_repo_dir_CVE-2020-23915/run_one_test.sh {test_id}` |
 
@@ -142,6 +151,7 @@ docker exec my_defects4c_peglib bash -lc '
     --raw-dir /out/unified_debugging/peglib/raw \
     --dual-run \
     --gcov-scope all \
+    --label-retries 8 \
     --debug-artifacts
 '
 ```
