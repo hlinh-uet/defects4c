@@ -328,6 +328,37 @@ def compile_project(repo: Path, *, jobs: int, asan: bool, coverage: bool, timeou
     return True
 
 
+def metadata_compile_cmd(repo: Path, *, jobs: int) -> str:
+    """Build command stored in metadata for Unified-Debugging APR validation."""
+    build_dir = BUILD_DIR_NAME
+    cmake_args = [
+        "cmake",
+        "-G", "Ninja",
+        "-S", ".",
+        "-B", build_dir,
+        "-DCMAKE_BUILD_TYPE=Debug",
+        "-DCMAKE_C_FLAGS=" + COV_CFLAGS,
+        "-DCMAKE_CXX_FLAGS=" + COV_CFLAGS,
+        "-DCMAKE_EXE_LINKER_FLAGS=" + COV_LDFLAGS,
+        "-DCMAKE_SHARED_LINKER_FLAGS=" + COV_LDFLAGS,
+        "-DBUILD_TESTS=ON",
+        "-DBUILD_GUI=OFF",
+        "-DHAVE_RULES=OFF",
+        "-DUSE_MATCHCOMPILER=OFF",
+    ]
+    ninja_base = ["ninja", "-C", build_dir, f"-j{jobs}"]
+    build_testrunner = " || ".join(
+        " ".join(shlex.quote(x) for x in [*ninja_base, target])
+        for target in ("testrunner", "bin/testrunner", "test/testrunner")
+    )
+    return (
+        f"cd {shlex.quote(str(repo))} && "
+        f"{' '.join(shlex.quote(x) for x in cmake_args)} && "
+        f"{' '.join(shlex.quote(x) for x in ninja_base)} && "
+        f"(test -x {shlex.quote(str(Path(build_dir) / 'bin' / 'testrunner'))} || {build_testrunner})"
+    )
+
+
 def list_ctest_details(build_dir: Path) -> Tuple[List[str], Dict[str, List[str]]]:
     rc, out, err = run(["ctest", "--test-dir", str(build_dir), "--show-only=json-v1"], cwd=build_dir, timeout=60)
     if rc == 0:
@@ -928,6 +959,8 @@ def _existing_metadata_is_current(
         return False
     if require_coverage and phase_info.get("skip_coverage"):
         return False
+    if require_coverage and not any(t.get("covered_functions") for t in tests if isinstance(t, dict)):
+        return False
     return True
 
 
@@ -997,11 +1030,7 @@ def process_bug(
         return None
 
     source_file = str(repo / bug.src_files[0]) if bug.src_files else ""
-    compile_cmd = (
-        f"cd {shlex.quote(str(repo))} && cmake -G Ninja -S . -B {BUILD_DIR_NAME} "
-        f"-DBUILD_TESTS=ON -DBUILD_GUI=OFF -DCMAKE_CXX_FLAGS='{COV_CFLAGS}' && "
-        f"ninja -C {BUILD_DIR_NAME} -j{jobs}"
-    )
+    compile_cmd = metadata_compile_cmd(repo, jobs=jobs)
     test_cmd_template = f"bash {shlex.quote(str(repo / 'run_one_test.sh'))} {{test_id}}"
     phase_info = {
         "dual_run": dual_run,
@@ -1117,7 +1146,7 @@ def process_bug(
         raw_results.append(TestResult(
             **common,
             covered_functions=raw_cov_map.get(result.test_id, []),
-            coverage_error="",
+            coverage_error=cov_error_map.get(result.test_id, ""),
         ))
         metadata_results.append(TestResult(
             **common,
