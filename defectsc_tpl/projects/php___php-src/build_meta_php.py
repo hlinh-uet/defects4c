@@ -530,7 +530,7 @@ def collect_coverage(repo_dir: Path) -> Dict[str, List[str]]:
     for gcda in gcda_files:
         funcs_called: List[str] = []
         rc, out, _ = run(
-            ["gcov", "-f", "-b", "-c", gcda.name],
+            ["gcov", "-f", gcda.name],
             cwd=gcda.parent,
             capture=True,
             timeout=30,
@@ -584,12 +584,7 @@ def coverage_to_qualified(cov_map: Dict[str, List[str]]) -> List[str]:
 
 
 def write_run_one_test(repo_dir: Path, entries: List[TestEntry]) -> None:
-    case_lines = []
-    for te in entries:
-        cmd = " ".join(shlex.quote(x) for x in te.command)
-        case_lines.append(
-            f"{shlex.quote(te.test_id)}) cd \"$ROOT\"; exec {cmd} ;;"
-        )
+    del entries
     script = repo_dir / "run_one_test.sh"
     script.write_text(
         "#!/usr/bin/env bash\n"
@@ -598,10 +593,14 @@ def write_run_one_test(repo_dir: Path, entries: List[TestEntry]) -> None:
         "export NO_INTERACTION=1\n"
         "export TEST_PHP_EXECUTABLE=\"$ROOT/sapi/cli/php\"\n"
         "test_id=${1:?usage: run_one_test.sh <test_id>}\n"
-        "case \"$test_id\" in\n"
-        + "\n".join("  " + line for line in case_lines)
-        + "\n  *) echo \"unknown test_id: $test_id\" >&2; exit 2 ;;\n"
-        "esac\n",
+        "test_rel=\"$test_id\"\n"
+        "[[ \"$test_rel\" == *.phpt ]] || test_rel=\"${test_rel}.phpt\"\n"
+        "if [[ ! -f \"$ROOT/$test_rel\" ]]; then\n"
+        "  echo \"unknown test_id: $test_id\" >&2\n"
+        "  exit 2\n"
+        "fi\n"
+        "cd \"$ROOT\"\n"
+        "exec sapi/cli/php run-tests.php -q -p sapi/cli/php -g FAIL,XFAIL,BORK,WARN,LEAK,SKIP \"$test_rel\"\n",
         encoding="utf-8",
     )
     script.chmod(0o755)
@@ -638,7 +637,8 @@ def _existing_metadata_is_current(path: Path) -> bool:
         version = int(phase_info.get("coverage_parser_version") or 0)
     except (TypeError, ValueError):
         version = 0
-    if version != COVERAGE_PARSER_VERSION or not isinstance(data.get("tests"), list):
+    tests = data.get("tests")
+    if version != COVERAGE_PARSER_VERSION or not isinstance(tests, list) or not tests:
         return False
     if phase_info.get("phase_b_status") == "compile_failed":
         return False
@@ -646,6 +646,8 @@ def _existing_metadata_is_current(path: Path) -> bool:
         if phase_info.get("mode") == "dual" and "phase_b_with_coverage" not in phase_info:
             return False
         if phase_info.get("mode") == "single" and "with_coverage" not in phase_info:
+            return False
+        if not any(t.get("covered_functions") for t in tests if isinstance(t, dict)):
             return False
     return True
 
@@ -773,9 +775,20 @@ def _empty_record(bug: BugEntry, repo_dir: Path, compile_cmd: str, *, error: str
     }
 
 
-def _compile_cmd_for_meta(bug: BugEntry, *, jobs: int) -> str:
+def _shell_env_prefix(*, asan: bool, coverage: bool) -> str:
+    env = _build_env(asan=asan, coverage=coverage)
+    parts = []
+    for key in ("PATH", "CC", "CXX", "CFLAGS", "LDFLAGS", "NO_INTERACTION", "ASAN_OPTIONS"):
+        value = env.get(key)
+        if value:
+            parts.append(f"{key}={shlex.quote(value)}")
+    return " ".join(parts)
+
+
+def _compile_cmd_for_meta(bug: BugEntry, *, jobs: int, asan: bool) -> str:
     cfg = " ".join(shlex.quote(x) for x in _configure_cmd(bug))
-    return f"./buildconf --force && {cfg} && make -j {jobs}"
+    env_prefix = _shell_env_prefix(asan=asan, coverage=False)
+    return f"{env_prefix} ./buildconf --force && {env_prefix} {cfg} && {env_prefix} make -j {jobs}"
 
 
 def process_bug(
@@ -802,7 +815,7 @@ def process_bug(
         log(f"  [error] không tìm/clone được repo: {exc}")
         return None
 
-    compile_cmd = _compile_cmd_for_meta(bug, jobs=jobs)
+    compile_cmd = _compile_cmd_for_meta(bug, jobs=jobs, asan=(dual_run or asan))
 
     try:
         checkout_buggy(repo_dir, bug)
