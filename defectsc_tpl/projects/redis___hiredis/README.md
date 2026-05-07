@@ -34,6 +34,11 @@ For each bug:
 6. Phase B checks out buggy again, rebuilds with GCOV and no ASAN, and records `covered_functions`.
 7. The script rebuilds buggy ASAN at the end so `test_cmd_template` can reproduce the failing oracle.
 
+The builder is intentionally strict: it does not infer coverage from ASAN
+stack traces or stderr. If Phase A fixed, Phase B GCOV, or the final ASAN
+rebuild fails, the output record is marked with `build_error` instead of
+silently writing metadata that looks complete but is not trustworthy.
+
 The script asserts these checkout invariants before every build:
 
 | Tree | Required state |
@@ -50,7 +55,7 @@ Expected related test for the current bug:
 The ground-truth function should be extracted as `createArrayObject` from the
 patch hunk in `hiredis.c`.
 
-Note: hiredis has one custom test executable and no native per-case filter. The builder stores each numbered test line as a separate metadata test, but Phase B coverage is collected at suite granularity and reused for each custom test entry. This is recorded in `phase_info.coverage_granularity`. For buggy Phase A, the builder first runs strict ASAN to catch the CVE oracle, then reruns tolerant ASAN to recover the full numbered test list and overlays the sanitizer failure on the maxelements test.
+Note: hiredis has one custom test executable and no native per-case filter. The builder stores each numbered test line as a separate metadata test, but Phase B coverage is collected at suite granularity and reused for each custom test entry. This is recorded in `phase_info.coverage_granularity`. Buggy Phase A uses strict ASAN only; it does not rerun in a tolerant mode to make the test list appear more complete.
 
 ## 3. Docker
 
@@ -93,8 +98,7 @@ docker exec my_defects4c_hiredis bash -lc '
     --metadata-dir /out/unified_debugging/hiredis/metadata \
     --raw-dir /out/unified_debugging/hiredis/raw \
     --dual-run \
-    --gcov-scope all \
-    --debug-artifacts
+    --gcov-scope all
 '
 ```
 
@@ -108,7 +112,6 @@ docker exec my_defects4c_hiredis bash -lc '
     --raw-dir /out/unified_debugging/hiredis/raw \
     --dual-run \
     --gcov-scope all \
-    --debug-artifacts \
     --skip-if-exists
 '
 ```
@@ -132,5 +135,5 @@ Expected:
 | `bug_id` | `CVE-2021-32765` |
 | `outcome=FAIL`, `outcome_fixed=PASS` | Only the maxelements multi-bulk test |
 | `phase_a_fixed_fail_count` | `0` |
-| `phase_b_with_coverage` | Same as `tests.Count` when GCOV succeeds |
+| `phase_b_with_coverage` | Same as `tests.Count` when GCOV succeeds; otherwise the record has `build_error` |
 | `raw` and `metadata` | Same JSON content |

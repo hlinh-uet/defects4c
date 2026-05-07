@@ -67,13 +67,6 @@ _GCOV_LINES_EXEC_RE = re.compile(r"^Lines executed:([0-9.]+)%")
 _GCOV_FUNC_CALLED_RE = re.compile(
     r"^function\s+(?P<name>.+?)\s+called\s+(?P<calls>\d+)\s+returned",
 )
-_ASAN_FRAME_RE = re.compile(
-    r"^\s*#\d+\s+0x[0-9a-fA-F]+\s+in\s+(?P<func>.*?)\s+"
-    r"(?P<file>/[^:\s]+):\d+",
-    re.MULTILINE,
-)
-
-
 @dataclass
 class BugEntry:
     sha_after: str
@@ -154,22 +147,9 @@ def _detect_default_raw_dir() -> Path:
     )
 
 
-def _detect_default_debug_dir() -> Path:
-    if _safe_exists(Path("/out")):
-        return Path("/out") / "unified_debugging" / SHORT_PROJECT / "debug"
-    return (
-        DEFECTS4C_ROOT
-        / "out_tmp_dirs"
-        / "unified_debugging"
-        / SHORT_PROJECT
-        / "debug"
-    )
-
-
 DEFAULT_OUT_ROOT = _detect_default_out_root()
 DEFAULT_METADATA_DIR = _detect_default_metadata_dir()
 DEFAULT_RAW_DIR = _detect_default_raw_dir()
-DEFAULT_DEBUG_DIR = _detect_default_debug_dir()
 
 
 def _safe_label(value: str) -> str:
@@ -779,8 +759,6 @@ def run_tests(
                 debug_label=test_label,
             )
             covered_funcs = coverage_to_qualified(cov_map)
-            if not covered_funcs and not passed:
-                covered_funcs = fallback_coverage_from_output(combined_output, repo_dir)
             if covered_funcs:
                 n_with_cov += 1
             if debug_dir:
@@ -985,7 +963,7 @@ def collect_coverage(
                 cwd=gcda.parent,
                 capture=True,
                 timeout=60,
-                debug_path=(debug_dir / f"{gcov_label}.gcov_fallback.log") if debug_dir else None,
+                debug_path=(debug_dir / f"{gcov_label}.gcov_compat.log") if debug_dir else None,
             )
         if rc != 0:
             log(f"  [cov] gcov failed for {gcda.name}: {(out + err)[-800:]}")
@@ -1008,22 +986,6 @@ def coverage_to_qualified(cov_map: Dict[str, List[str]]) -> List[str]:
         for fn in funcs:
             out.append(f"{base}:{fn}")
     return sorted(set(out))
-
-
-def fallback_coverage_from_output(output: str, repo_dir: Path) -> List[str]:
-    covered: List[str] = []
-    repo_resolved = repo_dir.resolve()
-    for m in _ASAN_FRAME_RE.finditer(output):
-        func = m.group("func").strip()
-        file_path = Path(m.group("file"))
-        try:
-            rel = file_path.resolve().relative_to(repo_resolved).as_posix()
-        except (OSError, ValueError):
-            continue
-        if func.startswith("__interceptor_"):
-            continue
-        covered.append(f"{os.path.basename(rel)}:{func}")
-    return sorted(set(covered))
 
 
 def _script_arg(arg: str, repo_dir: Path) -> str:
@@ -1128,8 +1090,14 @@ def _existing_output_is_complete(path: Path) -> bool:
     if payload.get("build_error"):
         return False
     tests = payload.get("tests") or []
+    phase_info = payload.get("phase_info") or {}
     if len(tests) <= 1 and (tests[0].get("test_id") if tests else "") in {"TestMain", "test-main"}:
         return False
+    if phase_info.get("mode") == "dual":
+        if phase_info.get("phase_b_status") != "ok":
+            return False
+        if any(not t.get("covered_functions") for t in tests):
+            return False
     return True
 
 
@@ -1332,13 +1300,22 @@ def process_bug(
                 )
             else:
                 phase_info["phase_a_fixed_status"] = "compile_failed"
+                record = _empty_record(bug, repo_dir, compile_cmd, error="phaseA_fixed_compile_failed")
+                record["phase_info"] = phase_info
+                _write_meta(raw_out_path, record)
+                _write_meta(out_path, record)
+                return out_path
         finally:
             checkout_buggy(repo_dir, bug)
 
         cov_by_test: Dict[str, List[str]] = {}
         selected_phase_b = _select_phase_b_entries(entries, results_a, bug, gcov_scope)
         if skip_coverage:
-            selected_phase_b = []
+            record = _empty_record(bug, repo_dir, compile_cmd, error="coverage_disabled")
+            record["phase_info"] = phase_info
+            _write_meta(raw_out_path, record)
+            _write_meta(out_path, record)
+            return out_path
         elif selected_phase_b:
             log(
                 "  [phaseB] checkout buggy + build GCOV "
@@ -1364,10 +1341,32 @@ def process_bug(
                 cov_by_test = {r.test_id: r.covered_functions for r in results_b}
                 phase_info["phase_b_with_coverage"] = n_cov
                 phase_info["phase_b_test_count"] = len(selected_phase_b)
+                phase_info["phase_b_status"] = "ok"
+                if n_cov != len(selected_phase_b):
+                    record = _empty_record(
+                        bug,
+                        repo_dir,
+                        compile_cmd,
+                        error="phaseB_incomplete_coverage",
+                    )
+                    record["phase_info"] = phase_info
+                    _write_meta(raw_out_path, record)
+                    _write_meta(out_path, record)
+                    return out_path
             else:
                 phase_info["phase_b_status"] = "compile_failed"
+                record = _empty_record(bug, repo_dir, compile_cmd, error="phaseB_compile_failed")
+                record["phase_info"] = phase_info
+                _write_meta(raw_out_path, record)
+                _write_meta(out_path, record)
+                return out_path
         else:
             phase_info["phase_b_test_count"] = 0
+            record = _empty_record(bug, repo_dir, compile_cmd, error="phaseB_no_selected_tests")
+            record["phase_info"] = phase_info
+            _write_meta(raw_out_path, record)
+            _write_meta(out_path, record)
+            return out_path
 
         log("  [finalize] rebuild buggy ASAN for test_cmd_template")
         try:
@@ -1386,6 +1385,12 @@ def process_bug(
                 phase_info["final_build_status"] = "compile_failed"
         except Exception as exc:
             phase_info["final_build_status"] = f"failed: {exc}"
+        if phase_info.get("final_build_status") != "ok":
+            record = _empty_record(bug, repo_dir, compile_cmd, error="final_buggy_compile_failed")
+            record["phase_info"] = phase_info
+            _write_meta(raw_out_path, record)
+            _write_meta(out_path, record)
+            return out_path
 
         results = [
             TestResult(
@@ -1475,8 +1480,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--out-root", type=Path, default=DEFAULT_OUT_ROOT, help=f"Repo output root (default: {DEFAULT_OUT_ROOT}).")
     ap.add_argument("--metadata-dir", type=Path, default=DEFAULT_METADATA_DIR, help=f"Metadata output dir (default: {DEFAULT_METADATA_DIR}).")
     ap.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW_DIR, help=f"Raw output dir (default: {DEFAULT_RAW_DIR}).")
-    ap.add_argument("--debug-artifacts", action="store_true", help="Write build/test/gcov logs for each phase.")
-    ap.add_argument("--debug-dir", type=Path, default=DEFAULT_DEBUG_DIR, help=f"Debug artifact dir (default: {DEFAULT_DEBUG_DIR}).")
     ap.add_argument("--jobs", type=int, default=max(os.cpu_count() or 2, 2) - 1, help="Parallel build jobs.")
     ap.add_argument("--test-timeout", type=int, default=DEFAULT_TEST_TIMEOUT, help="Timeout for each test executable.")
     ap.add_argument("--label-retries", type=int, default=DEFAULT_LABEL_RETRIES, help="ASAN label attempts per test; any failing attempt marks FAIL.")
@@ -1537,15 +1540,10 @@ def main(argv=None) -> int:
 
     args.metadata_dir.mkdir(parents=True, exist_ok=True)
     args.raw_dir.mkdir(parents=True, exist_ok=True)
-    if args.debug_artifacts:
-        args.debug_dir.mkdir(parents=True, exist_ok=True)
-
     log(f"Will process {len(bugs)} bug(s).")
     log(f"  metadata_dir = {args.metadata_dir}")
     log(f"  raw_dir      = {args.raw_dir}")
     log(f"  dual_run     = {args.dual_run}")
-    if args.debug_artifacts:
-        log(f"  debug_dir    = {args.debug_dir}")
     if args.dual_run:
         log(f"  gcov_scope   = {args.gcov_scope}")
 
@@ -1577,7 +1575,7 @@ def main(argv=None) -> int:
                 dual_run=args.dual_run,
                 gcov_scope=args.gcov_scope,
                 test_timeout=args.test_timeout,
-                debug_dir=args.debug_dir if args.debug_artifacts else None,
+                debug_dir=None,
                 label_retries=args.label_retries,
             )
             if result:

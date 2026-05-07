@@ -33,6 +33,11 @@ For each bug:
 5. Phase B checks out buggy again, rebuilds with GCOV and no ASAN, and records `covered_functions`.
 6. The script rebuilds buggy ASAN at the end so `test_cmd_template` can reproduce the failing oracle.
 
+The builder is intentionally strict: it does not infer coverage from ASAN
+stack traces or stderr. If Phase A fixed, Phase B GCOV, or the final ASAN
+rebuild fails, the output record is marked with `build_error` instead of
+silently writing metadata that looks complete but is not trustworthy.
+
 The script asserts these checkout invariants before every build:
 
 | Tree | Required state |
@@ -134,45 +139,11 @@ Checklist:
 | `bug_id` | `CVE-2020-23915` |
 | `tests` | Contains all Catch test cases, not only `TestMain`. |
 | triggering test | `catch_005_Invalid_UTF-8_text_test` has `outcome=FAIL`, `outcome_fixed=PASS`. |
-| `tests[*].covered_functions` | Non-empty for Phase B runs, preferably includes `peglib.h:*` functions. |
+| `tests[*].covered_functions` | Non-empty for every Phase B test; no ASAN/stderr coverage fallback is used. |
 | `ground_truth_functions` | Includes `codepoint_length` |
 | `test_cmd_template` | Points to `/out/yhirose___cpp-peglib/git_repo_dir_CVE-2020-23915/run_one_test.sh {test_id}` |
 
-## 6. Debug artifacts
-
-When the result is not as expected, rerun with `--debug-artifacts`:
-
-```bash
-docker exec my_defects4c_peglib bash -lc '
-  cd /src/projects/yhirose___cpp-peglib && \
-  python3 build_meta_peglib.py \
-    --sha b3b29ce8f3acf3a32733d930105a17d7b0ba347e \
-    --metadata-dir /out/unified_debugging/peglib/metadata \
-    --raw-dir /out/unified_debugging/peglib/raw \
-    --dual-run \
-    --gcov-scope all \
-    --label-retries 8 \
-    --debug-artifacts
-'
-```
-
-Logs are written to:
-
-```text
-out_tmp_dirs/unified_debugging/peglib/debug/CVE-2020-23915/
-```
-
-Important files:
-
-| File | What to check |
-|---|---|
-| `00_bug.json` | Commit IDs, source/test files, compile command. |
-| `phaseA-buggy/01_cmake_configure.log` | Actual CMake command and flags. |
-| `phaseA-buggy/02_cmake_build.log` | Compile/link errors and sanitizer flags. |
-| `phaseA-buggy/*test.log` | Exact test command, exit code, stdout/stderr. |
-| `phaseA-buggy/*summary.json` | Script's PASS/FAIL decision and output tail. |
-| `phaseB/*gcov*.log` | Raw `gcov` errors/output when coverage is empty. |
-| `phaseB/*coverage.json` | Parsed coverage map before it is converted to `covered_functions`. |
+## 6. Manual rerun
 
 Manual rerun inside the container:
 

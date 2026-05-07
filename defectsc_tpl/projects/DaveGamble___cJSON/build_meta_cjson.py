@@ -144,11 +144,14 @@ def _safe_exists(path: Path) -> bool:
 
 
 def _detect_default_out_root() -> Path:
-    container_default = Path("/out") / PROJECT_NAME
-    if _safe_exists(Path("/out")): 
-        return container_default
     host_default = DEFECTS4C_ROOT / "out_tmp_dirs" / PROJECT_NAME
+    if _safe_exists(host_default):
+        return host_default
+    container_default = Path("/out") / PROJECT_NAME
+    if _safe_exists(container_default):
+        return container_default
     return host_default
+
 
 def _detect_default_metadata_dir() -> Path:
     host_default = (

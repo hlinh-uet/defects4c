@@ -62,13 +62,6 @@ _GCOV_FUNC_LINES_RE = re.compile(
     r"Function '(?P<name>[^']+)'\nLines executed:(?P<pct>[0-9.]+)%",
     re.MULTILINE,
 )
-_ASAN_FRAME_RE = re.compile(
-    r"^\s*#\d+\s+0x[0-9a-fA-F]+\s+in\s+(?P<func>.*?)\s+"
-    r"(?P<file>/[^:\s]+):\d+",
-    re.MULTILINE,
-)
-
-
 @dataclass
 class BugEntry:
     sha_after: str
@@ -148,22 +141,9 @@ def _detect_default_raw_dir() -> Path:
     )
 
 
-def _detect_default_debug_dir() -> Path:
-    if _safe_exists(Path("/out")):
-        return Path("/out") / "unified_debugging" / SHORT_PROJECT / "debug"
-    return (
-        DEFECTS4C_ROOT
-        / "out_tmp_dirs"
-        / "unified_debugging"
-        / SHORT_PROJECT
-        / "debug"
-    )
-
-
 DEFAULT_OUT_ROOT = _detect_default_out_root()
 DEFAULT_METADATA_DIR = _detect_default_metadata_dir()
 DEFAULT_RAW_DIR = _detect_default_raw_dir()
-DEFAULT_DEBUG_DIR = _detect_default_debug_dir()
 
 
 def _safe_label(value: str) -> str:
@@ -840,20 +820,6 @@ def coverage_to_qualified(cov_map: Dict[str, List[str]]) -> List[str]:
     return sorted(set(out))
 
 
-def fallback_coverage_from_output(output: str, repo_dir: Path) -> List[str]:
-    repo_prefix = str(repo_dir)
-    covered: List[str] = []
-    for m in _ASAN_FRAME_RE.finditer(output):
-        func = m.group("func")
-        src = m.group("file")
-        if not src.startswith(repo_prefix):
-            continue
-        if func.startswith("__interceptor_"):
-            continue
-        covered.append(f"{os.path.basename(src)}:{func}")
-    return sorted(set(covered))
-
-
 def write_run_one_test(repo_dir: Path, results: List[TestResult]) -> None:
     mapping_lines = []
     for result in results:
@@ -985,6 +951,10 @@ def _existing_output_is_complete(path: Path) -> bool:
         return False
     if phase_info.get("test_discovery", {}).get("count", 0) != len(tests):
         return False
+    if phase_info.get("phase_b_status") != "ok":
+        return False
+    if any(not t.get("covered_functions") for t in tests):
+        return False
     return True
 
 
@@ -1079,7 +1049,7 @@ def process_bug(
         "checkout_invariants": "asserted_before_each_build",
         "coverage_build": "non_asan_gcov",
         "coverage_granularity": "suite_coverage_reused_for_each_custom_test",
-        "phase_a_buggy_strategy": "strict_asan_failure_overlay_tolerant_suite",
+        "phase_a_buggy_strategy": "strict_asan_only",
         "final_build": "asan_buggy",
     }
 
@@ -1107,28 +1077,21 @@ def process_bug(
     strict_output = out_buggy + err_buggy
     buggy_results = buggy_strict_results
     if _has_failure_marker(strict_output):
-        log("  [phaseA-buggy] strict ASAN found sanitizer failure; rerun tolerant ASAN for full test list")
-        rc_tol, out_tol, err_tol, buggy_tolerant_results = _run_hiredis_suite(
-            repo_dir,
-            test_timeout=test_timeout,
-            phase_label="phaseA-buggy-tolerant",
-            asan_env=True,
-            allow_allocator_may_return_null=True,
-            debug_dir=debug_bug_dir,
+        log("  [phaseA-buggy] strict ASAN found sanitizer failure")
+        buggy_results = overlay_asan_failure(
+            buggy_strict_results,
+            buggy_strict_results,
+            strict_output,
         )
-        if buggy_tolerant_results:
-            buggy_results = overlay_asan_failure(
-                buggy_tolerant_results,
-                buggy_strict_results,
-                strict_output,
-            )
-        else:
-            buggy_results = overlay_asan_failure(
-                buggy_strict_results,
-                buggy_strict_results,
-                strict_output,
-            )
     log(f"  [phaseA-buggy] parsed {len(buggy_results)} custom test outcome(s)")
+    if not buggy_results:
+        phase_info["phase_a_buggy_status"] = "no_parsed_tests"
+        phase_info["phase_a_buggy_output_tail"] = strict_output[-4000:]
+        record = _empty_record(bug, repo_dir, compile_cmd, error="phaseA_buggy_no_parsed_tests")
+        record["phase_info"] = phase_info
+        _write_meta(raw_out_path, record)
+        _write_meta(out_path, record)
+        return out_path
     log_test_progress("phaseA-buggy", buggy_results)
 
     fixed_results: List[TestResult] = []
@@ -1159,7 +1122,11 @@ def process_bug(
             log_test_progress("phaseA-fixed", fixed_results)
         else:
             phase_info["phase_a_fixed_status"] = "compile_failed"
-            log("  [warn] phaseA-fixed build failed, outcome_fixed will be empty.")
+            record = _empty_record(bug, repo_dir, compile_cmd, error="phaseA_fixed_compile_failed")
+            record["phase_info"] = phase_info
+            _write_meta(raw_out_path, record)
+            _write_meta(out_path, record)
+            return out_path
     finally:
         checkout_buggy(repo_dir, bug)
 
@@ -1178,6 +1145,11 @@ def process_bug(
     cov_functions: List[str] = []
     if skip_coverage:
         phase_info["phase_b_scope"] = "skip_coverage"
+        record = _empty_record(bug, repo_dir, compile_cmd, error="coverage_disabled")
+        record["phase_info"] = phase_info
+        _write_meta(raw_out_path, record)
+        _write_meta(out_path, record)
+        return out_path
     else:
         log(f"  [phaseB] checkout buggy + build GCOV (scope={gcov_scope}, suite)")
         checkout_buggy(repo_dir, bug)
@@ -1200,8 +1172,13 @@ def process_bug(
             )
             cov_map = collect_coverage(repo_dir, debug_bug_dir / "phaseB" if debug_bug_dir else None)
             cov_functions = coverage_to_qualified(cov_map)
-            if not cov_functions and (out_cov or err_cov):
-                cov_functions = fallback_coverage_from_output(out_cov + err_cov, repo_dir)
+            if not cov_functions:
+                phase_info["phase_b_status"] = "empty_coverage"
+                record = _empty_record(bug, repo_dir, compile_cmd, error="phaseB_empty_coverage")
+                record["phase_info"] = phase_info
+                _write_meta(raw_out_path, record)
+                _write_meta(out_path, record)
+                return out_path
             phase_info["phase_b_status"] = "ok"
             phase_info["phase_b_test_count"] = len(results)
             phase_info["phase_b_with_coverage"] = len(results) if cov_functions else 0
@@ -1211,6 +1188,11 @@ def process_bug(
             log_test_progress("phaseB", results, coverage_reused=True)
         else:
             phase_info["phase_b_status"] = "compile_failed"
+            record = _empty_record(bug, repo_dir, compile_cmd, error="phaseB_compile_failed")
+            record["phase_info"] = phase_info
+            _write_meta(raw_out_path, record)
+            _write_meta(out_path, record)
+            return out_path
 
     if skip_coverage:
         for result in results:
@@ -1229,6 +1211,12 @@ def process_bug(
         phase_label="final-asan-buggy",
     )
     phase_info["final_build_status"] = "ok" if final_ok else "compile_failed"
+    if not final_ok:
+        record = _empty_record(bug, repo_dir, compile_cmd, error="final_buggy_compile_failed")
+        record["phase_info"] = phase_info
+        _write_meta(raw_out_path, record)
+        _write_meta(out_path, record)
+        return out_path
 
     write_run_one_test(repo_dir, results)
     source_file = str(repo_dir / bug.src_files[0]) if bug.src_files else ""
@@ -1273,7 +1261,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--out-root", type=Path, default=DEFAULT_OUT_ROOT, help=f"Repo root (default: {DEFAULT_OUT_ROOT}).")
     ap.add_argument("--metadata-dir", type=Path, default=DEFAULT_METADATA_DIR, help=f"Metadata output (default: {DEFAULT_METADATA_DIR}).")
     ap.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW_DIR, help=f"Raw output (default: {DEFAULT_RAW_DIR}).")
-    ap.add_argument("--debug-dir", type=Path, default=DEFAULT_DEBUG_DIR, help=f"Debug artifact output (default: {DEFAULT_DEBUG_DIR}).")
     ap.add_argument("--jobs", type=int, default=max(os.cpu_count() or 2, 2) - 1, help="Parallel build jobs.")
     ap.add_argument("--test-timeout", type=int, default=DEFAULT_TEST_TIMEOUT, help="Timeout for the hiredis suite.")
     ap.add_argument("--skip-coverage", action="store_true", help="Do not collect gcov coverage.")
@@ -1284,7 +1271,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="all",
         help="Kept for project consistency; hiredis coverage is suite-level.",
     )
-    ap.add_argument("--debug-artifacts", action="store_true", help="Write command logs under debug-dir.")
     ap.add_argument("--skip-if-exists", action="store_true", help="Skip complete existing metadata.")
     ap.add_argument("--clone", action="store_true", help="Clone redis/hiredis if the repo is missing.")
     ap.add_argument("--prepare-repos", action="store_true", help="Prepare repos by bug_id, then exit.")
@@ -1333,16 +1319,12 @@ def main(argv=None) -> int:
 
     args.metadata_dir.mkdir(parents=True, exist_ok=True)
     args.raw_dir.mkdir(parents=True, exist_ok=True)
-    if args.debug_artifacts:
-        args.debug_dir.mkdir(parents=True, exist_ok=True)
     copy_bug_list(args.metadata_dir, args.raw_dir)
 
     log(f"Will process {len(bugs)} bug(s).")
     log(f"  metadata_dir = {args.metadata_dir}")
     log(f"  raw_dir      = {args.raw_dir}")
     log("  dual_run     = True")
-    if args.debug_artifacts:
-        log(f"  debug_dir    = {args.debug_dir}")
     log(f"  gcov_scope   = {args.gcov_scope}")
 
     lock_fp = None
@@ -1372,7 +1354,7 @@ def main(argv=None) -> int:
                 dual_run=args.dual_run,
                 gcov_scope=args.gcov_scope,
                 test_timeout=args.test_timeout,
-                debug_dir=args.debug_dir if args.debug_artifacts else None,
+                debug_dir=None,
             )
             if result:
                 ok += 1
