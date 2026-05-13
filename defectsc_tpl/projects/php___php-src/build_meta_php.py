@@ -38,13 +38,96 @@ BUGS_JSON = PROJECT_DIR / "bugs_list_new.json"
 
 REMOTE_URL = "https://github.com/php/php-src.git"
 DEFAULT_TEST_TIMEOUT = 180
-COVERAGE_PARSER_VERSION = 2
+COVERAGE_PARSER_VERSION = 3
 
 BASE_CFLAGS = "-Wno-error -g -O0"
 COV_CFLAGS = "-fprofile-arcs -ftest-coverage"
 COV_LDFLAGS = "-fprofile-arcs -ftest-coverage"
 ASAN_CFLAGS = "-fsanitize=address -fno-omit-frame-pointer"
 ASAN_LDFLAGS = "-fsanitize=address"
+
+GCOV_SIGNAL_FLUSH_C = r"""
+#define _GNU_SOURCE
+#include <signal.h>
+#include <string.h>
+
+extern void __gcov_dump(void) __attribute__((weak));
+
+#define GCOV_ALT_STACK_SIZE (1024 * 1024)
+
+static struct sigaction old_segv;
+static struct sigaction old_abrt;
+static struct sigaction old_bus;
+static struct sigaction old_ill;
+static struct sigaction old_fpe;
+static volatile sig_atomic_t dumping;
+static unsigned char altstack_mem[GCOV_ALT_STACK_SIZE] __attribute__((aligned(16)));
+
+static struct sigaction *old_action_for(int sig) {
+    switch (sig) {
+        case SIGSEGV: return &old_segv;
+        case SIGABRT: return &old_abrt;
+        case SIGBUS:  return &old_bus;
+        case SIGILL:  return &old_ill;
+        case SIGFPE:  return &old_fpe;
+        default:      return &old_segv;
+    }
+}
+
+static void flush_and_chain(int sig, siginfo_t *info, void *uctx) {
+    struct sigaction *old = old_action_for(sig);
+
+    if (!dumping) {
+        dumping = 1;
+        if (__gcov_dump) {
+            __gcov_dump();
+        }
+    }
+
+    if (old->sa_flags & SA_SIGINFO) {
+        if (old->sa_sigaction) {
+            old->sa_sigaction(sig, info, uctx);
+            return;
+        }
+    } else if (old->sa_handler == SIG_IGN) {
+        return;
+    } else if (old->sa_handler && old->sa_handler != SIG_DFL) {
+        old->sa_handler(sig);
+        return;
+    }
+
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void install_one(int sig, struct sigaction *old) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sigemptyset(&sa.sa_mask);
+    sa.sa_sigaction = flush_and_chain;
+    sa.sa_flags = SA_SIGINFO | SA_RESETHAND | SA_ONSTACK;
+    sigaction(sig, &sa, old);
+}
+
+static void install_altstack(void) {
+    stack_t ss;
+    memset(&ss, 0, sizeof(ss));
+    ss.ss_sp = altstack_mem;
+    ss.ss_size = sizeof(altstack_mem);
+    ss.ss_flags = 0;
+    sigaltstack(&ss, NULL);
+}
+
+__attribute__((constructor))
+static void install_handlers(void) {
+    install_altstack();
+    install_one(SIGSEGV, &old_segv);
+    install_one(SIGABRT, &old_abrt);
+    install_one(SIGBUS, &old_bus);
+    install_one(SIGILL, &old_ill);
+    install_one(SIGFPE, &old_fpe);
+}
+"""
 
 DEFAULT_CONFIGURE_FLAGS = [
     "--enable-phpdbg",
@@ -377,6 +460,36 @@ def compile_php(repo_dir: Path, bug: BugEntry, *, jobs: int, asan: bool, coverag
     return True
 
 
+def ensure_gcov_signal_flush_so(out_root: Path) -> Optional[Path]:
+    gcc = which("gcc")
+    if not gcc:
+        log("  [gcov-flush] gcc not found; crash-time gcov flush disabled.")
+        return None
+
+    build_dir = out_root / "_gcov_signal_flush"
+    src_path = build_dir / "gcov_flush_on_signal.c"
+    so_path = build_dir / "libgcov_flush_on_signal.so"
+    try:
+        build_dir.mkdir(parents=True, exist_ok=True)
+        current = src_path.read_text(encoding="utf-8") if src_path.exists() else ""
+        if current != GCOV_SIGNAL_FLUSH_C:
+            src_path.write_text(GCOV_SIGNAL_FLUSH_C, encoding="utf-8")
+        if so_path.exists() and so_path.stat().st_mtime >= src_path.stat().st_mtime:
+            return so_path
+    except OSError as exc:
+        log(f"  [gcov-flush] cannot prepare source: {exc}")
+        return None
+
+    rc, out, err = run(
+        [gcc, "-shared", "-fPIC", "-o", str(so_path), str(src_path)],
+        timeout=60,
+    )
+    if rc != 0:
+        log(f"  [gcov-flush] build failed rc={rc}\n{(out + err)[-2000:]}")
+        return None
+    return so_path
+
+
 def discover_tests(repo_dir: Path, bug: BugEntry, *, test_scope: str, max_tests: int) -> List[TestEntry]:
     tests: List[str]
     if test_scope == "metadata":
@@ -418,10 +531,20 @@ def clear_gcda(repo_dir: Path) -> None:
             pass
 
 
-def run_one_test(repo_dir: Path, te: TestEntry, *, timeout: int) -> Tuple[bool, str, str]:
+def run_one_test(
+    repo_dir: Path,
+    te: TestEntry,
+    *,
+    timeout: int,
+    gcov_flush_so: Optional[Path] = None,
+) -> Tuple[bool, str, str]:
     env = os.environ.copy()
     env["NO_INTERACTION"] = "1"
     env["TEST_PHP_EXECUTABLE"] = str(repo_dir / "sapi/cli/php")
+    if gcov_flush_so is not None:
+        existing = env.get("LD_PRELOAD", "")
+        preload = str(gcov_flush_so)
+        env["LD_PRELOAD"] = f"{preload} {existing}".strip()
     rc, out, err = run(te.command, cwd=repo_dir, env=env, timeout=timeout)
     combined = (out or "") + (err or "")
     counts = {
@@ -455,12 +578,18 @@ def run_tests(
     collect_cov: bool,
     test_timeout: int,
     phase_label: str,
+    gcov_flush_so: Optional[Path] = None,
 ) -> Tuple[List[TestResult], int]:
     results: List[TestResult] = []
     n_with_cov = 0
     for idx, te in enumerate(entries, 1):
         clear_gcda(repo_dir)
-        passed, combined_output, reason = run_one_test(repo_dir, te, timeout=test_timeout)
+        passed, combined_output, reason = run_one_test(
+            repo_dir,
+            te,
+            timeout=test_timeout,
+            gcov_flush_so=gcov_flush_so if collect_cov else None,
+        )
         covered_funcs: List[str] = []
         if collect_cov:
             covered_funcs = coverage_to_qualified(collect_coverage(repo_dir))
@@ -658,7 +787,14 @@ def _php_symbol_from_hunk_signature(signature: str) -> str:
         if match:
             return f"zif_{match.group(1)}"
 
-    for macro in ("PHP_METHOD", "ZEND_METHOD", "SPL_METHOD"):
+    match = re.search(
+        r"\bSPL_METHOD\s*\(\s*([A-Za-z_]\w*)\s*,\s*([A-Za-z_]\w*)\s*\)",
+        signature,
+    )
+    if match:
+        return f"zim_spl_{match.group(1)}_{match.group(2)}"
+
+    for macro in ("PHP_METHOD", "ZEND_METHOD"):
         match = re.search(
             rf"\b{macro}\s*\(\s*([A-Za-z_]\w*)\s*,\s*([A-Za-z_]\w*)\s*\)",
             signature,
@@ -698,8 +834,10 @@ def _php_symbol_at_line(repo_dir: Path, bug: BugEntry, src_file: str, line_numbe
         prefix,
     ))
     normal_matches = list(re.finditer(
-        r"(?m)^[A-Za-z_][\w\s\*]*\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{",
+        r"(?m)^[A-Za-z_][\w\s\*]*?[\s\*]+([A-Za-z_]\w*)\s*\([^;{}]*\)"
+        r"\s*(?:/\*.*?\*/\s*)?\{",
         prefix,
+        re.DOTALL,
     ))
 
     candidates: List[Tuple[int, str]] = []
@@ -867,9 +1005,13 @@ def process_bug(
         if not skip_coverage:
             log("  [phaseB] checkout buggy + build GCOV")
             if compile_php(repo_dir, bug, jobs=jobs, asan=False, coverage=True):
+                gcov_flush_so = ensure_gcov_signal_flush_so(out_root)
+                phase_info["phase_b_gcov_signal_flush"] = bool(gcov_flush_so)
                 results_b, n_cov = run_tests(
                     repo_dir, entries, collect_cov=True,
-                    test_timeout=test_timeout, phase_label="phaseB",
+                    test_timeout=test_timeout,
+                    phase_label="phaseB",
+                    gcov_flush_so=gcov_flush_so,
                 )
                 cov_by_test = {r.test_id: r.covered_functions for r in results_b}
                 phase_info["phase_b_with_coverage"] = n_cov
@@ -903,9 +1045,14 @@ def process_bug(
             return out_path
         entries = discover_tests(repo_dir, bug, test_scope=test_scope, max_tests=max_tests)
         write_run_one_test(repo_dir, entries)
+        gcov_flush_so = ensure_gcov_signal_flush_so(out_root) if not skip_coverage else None
+        if not skip_coverage:
+            phase_info["gcov_signal_flush"] = bool(gcov_flush_so)
         results, n_cov = run_tests(
             repo_dir, entries, collect_cov=not skip_coverage,
-            test_timeout=test_timeout, phase_label="single",
+            test_timeout=test_timeout,
+            phase_label="single",
+            gcov_flush_so=gcov_flush_so,
         )
         phase_info["with_coverage"] = n_cov
 

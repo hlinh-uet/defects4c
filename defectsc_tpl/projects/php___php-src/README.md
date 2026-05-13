@@ -52,7 +52,9 @@ Với mỗi bug trong `bugs_list_new.json`:
    * Chạy `./configure` với flags mặc định gần `build_tpl.jinja`, cộng thêm
      `c_compile.build_flags` của từng bug.
    * Phase A dùng ASAN để lấy outcome.
-   * Phase B dùng GCOV trên buggy overlay để lấy `covered_functions`.
+   * Phase B dùng GCOV trên buggy overlay để lấy `covered_functions`; khi test
+     crash bằng signal, script preload handler để gọi `__gcov_dump()` trước khi
+     process chết.
 
 5. **Phase A**
    * Chạy buggy để ghi `tests[*].outcome`.
@@ -64,8 +66,9 @@ Với mỗi bug trong `bugs_list_new.json`:
    * Build với `-fprofile-arcs -ftest-coverage`.
    * Trước từng test, xóa `*.gcda`.
    * Sau từng test, chạy `gcov` và ghi `tests[*].covered_functions`.
-   * Không fallback coverage từ ASAN/output. Test không sinh được `gcda` sẽ có
-     `covered_functions` rỗng để tránh trộn coverage giả với GCOV thật.
+   * Không fallback coverage từ ASAN/output hoặc fixed tree. Coverage vẫn là
+     buggy coverage; signal-flush chỉ cố ghi các GCOV counter đã chạy trước
+     crash. Test không sinh được `gcda` vẫn có `covered_functions` rỗng.
 
 7. **Metadata**
    * `bug_id` lấy từ `type.id`.
@@ -250,5 +253,5 @@ docker exec my_defects4c_php bash -lc 'kill <pid>'
 | `ground_truth_functions` | Từ hunk header của `git diff`; nếu hunk header không có function, fallback sang `func_start/hunk_start` trong `bugs_list_new.json` và scan function tại `commit_after`. |
 | `tests[*].outcome` | Kết quả chạy buggy overlay. |
 | `tests[*].outcome_fixed` | Kết quả chạy fixed tree khi bật `--dual-run`. |
-| `tests[*].covered_functions` | Coverage function của buggy overlay từ Phase B. |
+| `tests[*].covered_functions` | Coverage function của buggy overlay từ Phase B; crash signal được flush best-effort bằng `__gcov_dump()`. |
 | `test_cmd_template` | `bash <repo>/run_one_test.sh {test_id}`. |
