@@ -32,7 +32,6 @@ For each bug:
 4. Phase A checks out fixed, rebuilds with ASAN, and reruns the same suite to fill `outcome_fixed`.
 5. The script parses numbered output lines such as `#27 ... PASSED` into individual test entries.
 6. Phase B checks out buggy again, rebuilds with GCOV and no ASAN, and records `covered_functions`.
-7. The script rebuilds buggy ASAN at the end so `test_cmd_template` can reproduce the failing oracle.
 
 The script asserts these checkout invariants before every build:
 
@@ -50,7 +49,7 @@ Expected related test for the current bug:
 The ground-truth function should be extracted as `createArrayObject` from the
 patch hunk in `hiredis.c`.
 
-Note: hiredis has one custom test executable and no native per-case filter. The builder stores each numbered test line as a separate metadata test, but Phase B coverage is collected at suite granularity and reused for each custom test entry. This is recorded in `phase_info.coverage_granularity`. For buggy Phase A, the builder first runs strict ASAN to catch the CVE oracle, then reruns tolerant ASAN to recover the full numbered test list and overlays the sanitizer failure on the maxelements test.
+Note: hiredis has one custom test executable and no native per-case filter. The builder stores each numbered test line as a separate metadata test, but Phase B coverage is collected at suite granularity and reused for each custom test entry. For buggy Phase A, the builder first runs strict ASAN to catch the CVE oracle, then reruns tolerant ASAN to recover the full numbered test list and overlays the sanitizer failure on the maxelements test.
 
 ## 3. Docker
 
@@ -93,8 +92,7 @@ docker exec my_defects4c_hiredis bash -lc '
     --metadata-dir /out/unified_debugging/hiredis/metadata \
     --raw-dir /out/unified_debugging/hiredis/raw \
     --dual-run \
-    --gcov-scope all \
-    --debug-artifacts
+    --gcov-scope all
 '
 ```
 
@@ -108,7 +106,6 @@ docker exec my_defects4c_hiredis bash -lc '
     --raw-dir /out/unified_debugging/hiredis/raw \
     --dual-run \
     --gcov-scope all \
-    --debug-artifacts \
     --skip-if-exists
 '
 ```

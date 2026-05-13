@@ -148,68 +148,13 @@ def _detect_default_raw_dir() -> Path:
     )
 
 
-def _detect_default_debug_dir() -> Path:
-    if _safe_exists(Path("/out")):
-        return Path("/out") / "unified_debugging" / SHORT_PROJECT / "debug"
-    return (
-        DEFECTS4C_ROOT
-        / "out_tmp_dirs"
-        / "unified_debugging"
-        / SHORT_PROJECT
-        / "debug"
-    )
-
-
 DEFAULT_OUT_ROOT = _detect_default_out_root()
 DEFAULT_METADATA_DIR = _detect_default_metadata_dir()
 DEFAULT_RAW_DIR = _detect_default_raw_dir()
-DEFAULT_DEBUG_DIR = _detect_default_debug_dir()
 
 
 def _safe_label(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_") or "item"
-
-
-def _write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8", errors="replace")
-
-
-def _write_command_debug(
-    path: Optional[Path],
-    *,
-    args: List[str],
-    cwd,
-    env: Optional[dict],
-    env_keys: Optional[List[str]],
-    rc: int,
-    out: str,
-    err: str,
-    elapsed: float,
-) -> None:
-    if path is None:
-        return
-    selected_env = {}
-    for key in env_keys or []:
-        if env and key in env:
-            selected_env[key] = env[key]
-        elif key in os.environ:
-            selected_env[key] = os.environ[key]
-    header = {
-        "command": args,
-        "cwd": str(cwd) if cwd else "",
-        "returncode": rc,
-        "elapsed_sec": round(elapsed, 3),
-        "env": selected_env,
-    }
-    _write_text(
-        path,
-        json.dumps(header, indent=2, ensure_ascii=False)
-        + "\n\n--- stdout ---\n"
-        + (out or "")
-        + "\n\n--- stderr ---\n"
-        + (err or ""),
-    )
 
 
 def _timeout_stream(value) -> str:
@@ -228,11 +173,8 @@ def run(
     check=False,
     timeout=None,
     capture=True,
-    debug_path: Optional[Path] = None,
-    debug_env_keys: Optional[List[str]] = None,
 ):
     args = shlex.split(cmd) if isinstance(cmd, str) else list(cmd)
-    started = time.time()
     try:
         proc = subprocess.run(
             args,
@@ -250,47 +192,14 @@ def run(
         err_text = _timeout_stream(exp.stderr)
         if err_text:
             err = err + "\n" + err_text
-        _write_command_debug(
-            debug_path,
-            args=args,
-            cwd=cwd,
-            env=env,
-            env_keys=debug_env_keys,
-            rc=124,
-            out=out,
-            err=err,
-            elapsed=time.time() - started,
-        )
         return 124, out, err
     except UnicodeDecodeError as exp:
         err = f"UnicodeDecodeError: {exp}"
-        _write_command_debug(
-            debug_path,
-            args=args,
-            cwd=cwd,
-            env=env,
-            env_keys=debug_env_keys,
-            rc=1,
-            out="",
-            err=err,
-            elapsed=time.time() - started,
-        )
         return 1, "", err
 
     rc = proc.returncode
     out = (proc.stdout or "") if capture else ""
     err = (proc.stderr or "") if capture else ""
-    _write_command_debug(
-        debug_path,
-        args=args,
-        cwd=cwd,
-        env=env,
-        env_keys=debug_env_keys,
-        rc=rc,
-        out=out,
-        err=err,
-        elapsed=time.time() - started,
-    )
     if check and rc != 0:
         raise RuntimeError(
             f"Command failed ({rc}): {' '.join(shlex.quote(a) for a in args)}\n"
@@ -338,25 +247,26 @@ def load_bugs() -> List[BugEntry]:
     for item in data:
         typ = item.get("type") or {}
         files = item.get("files") or {}
-        bug_id = typ.get("id") or typ.get("name")
-        bugs.append(
-            BugEntry(
-                sha_after=item.get("commit_after", ""),
-                sha_before=item.get("commit_before", ""),
-                src_files=list(files.get("src") or []),
-                test_files=list(files.get("test") or []),
-                cve_name=typ.get("name") or bug_id,
-                type_id=bug_id,
-                raw=item,
-            )
+        sha_after = item.get("commit_after") or ""
+        sha_before = item.get("commit_before") or ""
+        bug = BugEntry(
+            sha_after=sha_after,
+            sha_before=sha_before,
+            src_files=list(files.get("src") or []),
+            test_files=list(files.get("test") or []),
+            cve_name=typ.get("name") or typ.get("id"),
+            type_id=typ.get("id") or sha_after,
+            raw=item,
         )
+        bugs.append(bug)
+
+    counts = Counter(b.bug_id for b in bugs)
+    for bug in bugs:
+        if counts[bug.bug_id] > 1:
+            bug.output_bug_id = f"{bug.bug_id}__{bug.sha_after[:12]}"
+        else:
+            bug.output_bug_id = bug.bug_id
     return bugs
-
-
-def copy_bug_list(metadata_dir: Path, raw_dir: Path) -> None:
-    for out_dir in (metadata_dir, raw_dir):
-        out_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(BUGS_JSON, out_dir / "bugs_list_new.json")
 
 
 def repo_dir_for_bug(out_root: Path, bug: BugEntry) -> Path:
@@ -526,8 +436,6 @@ def compile_hiredis(
     jobs: int,
     asan: bool,
     coverage: bool,
-    debug_dir: Optional[Path],
-    phase_label: str,
 ) -> bool:
     if not which("cmake"):
         log("  [build] cmake is not in PATH")
@@ -542,8 +450,6 @@ def compile_hiredis(
         env=env,
         capture=True,
         timeout=180,
-        debug_path=(debug_dir / phase_label / "00_cmake_configure.log") if debug_dir else None,
-        debug_env_keys=["CFLAGS", "LDFLAGS", "ASAN_OPTIONS"],
     )
     if rc != 0:
         log(f"  [build] cmake configure failed rc={rc}\n{(out + err)[-3000:]}")
@@ -554,8 +460,6 @@ def compile_hiredis(
         env=env,
         capture=True,
         timeout=240,
-        debug_path=(debug_dir / phase_label / "01_cmake_build.log") if debug_dir else None,
-        debug_env_keys=["CFLAGS", "LDFLAGS", "ASAN_OPTIONS"],
     )
     if rc != 0:
         log(f"  [build] cmake build failed rc={rc}\n{(out + err)[-3000:]}")
@@ -606,7 +510,6 @@ def _run_hiredis_suite(
     phase_label: str,
     asan_env: bool,
     allow_allocator_may_return_null: bool = False,
-    debug_dir: Optional[Path],
 ) -> Tuple[int, str, str, List[TestResult]]:
     build_dir = repo_dir / BUILD_DIR_NAME
     env = os.environ.copy()
@@ -630,8 +533,6 @@ def _run_hiredis_suite(
         env=env,
         capture=True,
         timeout=test_timeout,
-        debug_path=(debug_dir / phase_label / "run_suite.log") if debug_dir else None,
-        debug_env_keys=["ASAN_OPTIONS", "REDIS_SERVER", "REDIS_PORT"],
     )
     combined = out + err
     parsed = parse_hiredis_output(combined)
@@ -715,38 +616,22 @@ def log_test_progress(
     phase_label: str,
     results: List[TestResult],
     *,
-    show_fixed: bool = False,
-    coverage_reused: bool = False,
+    collect_cov: bool,
 ) -> None:
-    total = len(results)
     n_fail = 0
-    n_fixed_fail = 0
     n_with_cov = 0
+    total = len(results)
     for idx, result in enumerate(results, 1):
         if result.outcome == "FAIL":
             n_fail += 1
-        if result.outcome_fixed == "FAIL":
-            n_fixed_fail += 1
         if result.covered_functions:
             n_with_cov += 1
 
-        if show_fixed:
-            info = (
-                f"fail={n_fail}, fixed_fail={n_fixed_fail}, "
-                f"test={result.test_id}, outcome={result.outcome}/{result.outcome_fixed or '?'}"
-            )
-        elif coverage_reused:
-            info = (
-                f"fail={n_fail}, with_coverage={n_with_cov}, "
-                f"test={result.test_id}, coverage={'YES' if result.covered_functions else 'NO'}"
-            )
+        if collect_cov:
+            cov_info = f", with_coverage={n_with_cov}"
         else:
-            info = (
-                f"fail={n_fail} (no-cov run), "
-                f"test={result.test_id}, outcome={result.outcome}"
-            )
-        reason = f" reason={result.fail_reason}" if result.fail_reason else ""
-        log(f"  [{phase_label}] {idx}/{total} done ({info})")
+            cov_info = " (no-cov run)"
+        log(f"  [{phase_label}] {idx}/{total} done (fail={n_fail}{cov_info})")
 
 
 def clear_gcda(repo_dir: Path) -> None:
@@ -775,7 +660,7 @@ def _source_candidates(repo_dir: Path, gcda: Path) -> List[Path]:
     return list(dict.fromkeys(out))
 
 
-def collect_coverage(repo_dir: Path, debug_dir: Optional[Path] = None) -> Dict[str, List[str]]:
+def collect_coverage(repo_dir: Path) -> Dict[str, List[str]]:
     if not which("gcov"):
         return {}
     gcda_files = list((repo_dir / BUILD_DIR_NAME).rglob("*.gcda"))
@@ -796,7 +681,6 @@ def collect_coverage(repo_dir: Path, debug_dir: Optional[Path] = None) -> Dict[s
             cwd=gcda.parent,
             capture=True,
             timeout=60,
-            debug_path=(debug_dir / f"{idx:03d}_{gcda.name}.gcov.log") if debug_dir else None,
         )
         if rc != 0 or src_path is None:
             continue
@@ -970,24 +854,6 @@ def _write_meta(path: Path, record: dict) -> None:
     path.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def _existing_output_is_complete(path: Path) -> bool:
-    if not path.exists():
-        return False
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    if payload.get("build_error"):
-        return False
-    tests = payload.get("tests") or []
-    phase_info = payload.get("phase_info") or {}
-    if len(tests) <= 1:
-        return False
-    if phase_info.get("test_discovery", {}).get("count", 0) != len(tests):
-        return False
-    return True
-
-
 def _empty_record(bug: BugEntry, repo_dir: Path, compile_cmd: str, *, error: str) -> dict:
     source_file = str(repo_dir / bug.src_files[0]) if bug.src_files else ""
     return {
@@ -1009,9 +875,15 @@ def _empty_record(bug: BugEntry, repo_dir: Path, compile_cmd: str, *, error: str
     }
 
 
-def _compile_cmd_for_meta(repo_dir: Path, *, jobs: int) -> str:
+def _compile_cmd_for_meta(
+    repo_dir: Path,
+    *,
+    asan: bool,
+    coverage: bool,
+    jobs: int,
+) -> str:
     build_dir = repo_dir / BUILD_DIR_NAME
-    cfg = _cmake_configure_cmd(repo_dir, build_dir, asan=True, coverage=False)
+    cfg = _cmake_configure_cmd(repo_dir, build_dir, asan=asan, coverage=coverage)
     return " ".join(shlex.quote(x) for x in cfg) + (
         f" && cmake --build {shlex.quote(str(build_dir))} --parallel {jobs}"
     )
@@ -1029,11 +901,9 @@ def process_bug(
     dual_run: bool,
     gcov_scope: str,
     test_timeout: int,
-    debug_dir: Optional[Path],
 ) -> Optional[Path]:
     out_path = metadata_dir / f"{bug.safe_bug_id}_meta.json"
     raw_out_path = raw_dir / f"{bug.safe_bug_id}_meta.json"
-    debug_bug_dir = debug_dir / bug.safe_bug_id if debug_dir else None
 
     try:
         repo_dir = ensure_repo(bug, out_root, clone=clone)
@@ -1041,26 +911,12 @@ def process_bug(
         log(f"  [error] cannot find/clone repo: {exc}")
         return None
 
-    compile_cmd = _compile_cmd_for_meta(repo_dir, jobs=jobs)
-    if debug_bug_dir:
-        if debug_bug_dir.exists():
-            shutil.rmtree(debug_bug_dir)
-        _write_text(
-            debug_bug_dir / "00_bug.json",
-            json.dumps(
-                {
-                    "bug_id": bug.bug_id,
-                    "repo_dir": str(repo_dir),
-                    "commit_after": bug.sha_after,
-                    "commit_before": bug.sha_before,
-                    "src_files": bug.src_files,
-                    "test_files": bug.test_files,
-                    "compile_cmd": compile_cmd,
-                },
-                indent=2,
-                ensure_ascii=False,
-            ),
-        )
+    compile_cmd = _compile_cmd_for_meta(
+        repo_dir,
+        asan=True,
+        coverage=True,
+        jobs=jobs,
+    )
 
     try:
         checkout_buggy(repo_dir, bug)
@@ -1068,19 +924,10 @@ def process_bug(
         log(f"  [error] checkout buggy failed: {exc}")
         return None
 
-    if not dual_run:
-        dual_run = True
-
     phase_info: Dict[str, object] = {
         "mode": "dual",
         "phase_b_scope": gcov_scope,
-        "test_policy": "fixed_tree_hiredis_custom_tests_for_buggy_and_fixed",
-        "version_policy": "fixed=commit_after; buggy=commit_after_with_files.src_from_commit_before",
-        "checkout_invariants": "asserted_before_each_build",
-        "coverage_build": "non_asan_gcov",
-        "coverage_granularity": "suite_coverage_reused_for_each_custom_test",
-        "phase_a_buggy_strategy": "strict_asan_failure_overlay_tolerant_suite",
-        "final_build": "asan_buggy",
+        "test_policy": "fixed_tree_tests_for_buggy_and_fixed",
     }
 
     log("  [phaseA-buggy] checkout+build ASAN")
@@ -1089,8 +936,6 @@ def process_bug(
         jobs=jobs,
         asan=True,
         coverage=False,
-        debug_dir=debug_bug_dir,
-        phase_label="phaseA-buggy",
     ):
         record = _empty_record(bug, repo_dir, compile_cmd, error="phaseA_buggy_compile_failed")
         _write_meta(raw_out_path, record)
@@ -1102,7 +947,6 @@ def process_bug(
         phase_label="phaseA-buggy-strict",
         asan_env=True,
         allow_allocator_may_return_null=False,
-        debug_dir=debug_bug_dir,
     )
     strict_output = out_buggy + err_buggy
     buggy_results = buggy_strict_results
@@ -1114,7 +958,6 @@ def process_bug(
             phase_label="phaseA-buggy-tolerant",
             asan_env=True,
             allow_allocator_may_return_null=True,
-            debug_dir=debug_bug_dir,
         )
         if buggy_tolerant_results:
             buggy_results = overlay_asan_failure(
@@ -1129,7 +972,7 @@ def process_bug(
                 strict_output,
             )
     log(f"  [phaseA-buggy] parsed {len(buggy_results)} custom test outcome(s)")
-    log_test_progress("phaseA-buggy", buggy_results)
+    log_test_progress("phaseA-buggy", buggy_results, collect_cov=False)
 
     fixed_results: List[TestResult] = []
     try:
@@ -1140,8 +983,6 @@ def process_bug(
             jobs=jobs,
             asan=True,
             coverage=False,
-            debug_dir=debug_bug_dir,
-            phase_label="phaseA-fixed",
         ):
             rc_fixed, out_fixed, err_fixed, fixed_results = _run_hiredis_suite(
                 repo_dir,
@@ -1149,14 +990,13 @@ def process_bug(
                 phase_label="phaseA-fixed",
                 asan_env=True,
                 allow_allocator_may_return_null=False,
-                debug_dir=debug_bug_dir,
             )
             phase_info["phase_a_fixed_status"] = "ok"
             phase_info["phase_a_fixed_fail_count"] = sum(
                 1 for r in fixed_results if r.outcome == "FAIL"
             )
             log(f"  [phaseA-fixed] parsed {len(fixed_results)} custom test outcome(s)")
-            log_test_progress("phaseA-fixed", fixed_results)
+            log_test_progress("phaseA-fixed", fixed_results, collect_cov=False)
         else:
             phase_info["phase_a_fixed_status"] = "compile_failed"
             log("  [warn] phaseA-fixed build failed, outcome_fixed will be empty.")
@@ -1168,26 +1008,19 @@ def process_bug(
         buggy_results=buggy_results,
         fixed_required=bool(fixed_results),
     )
-    phase_info["test_discovery"] = {
-        "runner": "hiredis_custom_output",
-        "scope": "numbered_test_lines",
-        "count": len(results),
-    }
-    log_test_progress("phaseA-merged", results, show_fixed=True)
+    phase_info["phase_a_fail_count"] = sum(1 for r in results if r.outcome == "FAIL")
 
     cov_functions: List[str] = []
     if skip_coverage:
         phase_info["phase_b_scope"] = "skip_coverage"
     else:
-        log(f"  [phaseB] checkout buggy + build GCOV (scope={gcov_scope}, suite)")
+        log("  [phaseB] checkout buggy + build GCOV")
         checkout_buggy(repo_dir, bug)
         if compile_hiredis(
             repo_dir,
             jobs=jobs,
             asan=False,
             coverage=True,
-            debug_dir=debug_bug_dir,
-            phase_label="phaseB",
         ):
             clear_gcda(repo_dir)
             rc_cov, out_cov, err_cov, cov_results = _run_hiredis_suite(
@@ -1196,39 +1029,22 @@ def process_bug(
                 phase_label="phaseB",
                 asan_env=False,
                 allow_allocator_may_return_null=False,
-                debug_dir=debug_bug_dir,
             )
-            cov_map = collect_coverage(repo_dir, debug_bug_dir / "phaseB" if debug_bug_dir else None)
+            cov_map = collect_coverage(repo_dir)
             cov_functions = coverage_to_qualified(cov_map)
             if not cov_functions and (out_cov or err_cov):
                 cov_functions = fallback_coverage_from_output(out_cov + err_cov, repo_dir)
-            phase_info["phase_b_status"] = "ok"
             phase_info["phase_b_test_count"] = len(results)
             phase_info["phase_b_with_coverage"] = len(results) if cov_functions else 0
-            phase_info["phase_b_parsed_test_count"] = len(cov_results)
             for result in results:
                 result.covered_functions = cov_functions
-            log_test_progress("phaseB", results, coverage_reused=True)
+            log_test_progress("phaseB", results, collect_cov=True)
         else:
             phase_info["phase_b_status"] = "compile_failed"
 
     if skip_coverage:
         for result in results:
             result.covered_functions = cov_functions
-
-    phase_info["phase_a_fail_count"] = sum(1 for r in results if r.outcome == "FAIL")
-
-    log("  [finalize] rebuild buggy ASAN for test_cmd_template")
-    checkout_buggy(repo_dir, bug)
-    final_ok = compile_hiredis(
-        repo_dir,
-        jobs=jobs,
-        asan=True,
-        coverage=False,
-        debug_dir=debug_bug_dir,
-        phase_label="final-asan-buggy",
-    )
-    phase_info["final_build_status"] = "ok" if final_ok else "compile_failed"
 
     write_run_one_test(repo_dir, results)
     source_file = str(repo_dir / bug.src_files[0]) if bug.src_files else ""
@@ -1273,7 +1089,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--out-root", type=Path, default=DEFAULT_OUT_ROOT, help=f"Repo root (default: {DEFAULT_OUT_ROOT}).")
     ap.add_argument("--metadata-dir", type=Path, default=DEFAULT_METADATA_DIR, help=f"Metadata output (default: {DEFAULT_METADATA_DIR}).")
     ap.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW_DIR, help=f"Raw output (default: {DEFAULT_RAW_DIR}).")
-    ap.add_argument("--debug-dir", type=Path, default=DEFAULT_DEBUG_DIR, help=f"Debug artifact output (default: {DEFAULT_DEBUG_DIR}).")
     ap.add_argument("--jobs", type=int, default=max(os.cpu_count() or 2, 2) - 1, help="Parallel build jobs.")
     ap.add_argument("--test-timeout", type=int, default=DEFAULT_TEST_TIMEOUT, help="Timeout for the hiredis suite.")
     ap.add_argument("--skip-coverage", action="store_true", help="Do not collect gcov coverage.")
@@ -1284,8 +1099,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="all",
         help="Kept for project consistency; hiredis coverage is suite-level.",
     )
-    ap.add_argument("--debug-artifacts", action="store_true", help="Write command logs under debug-dir.")
-    ap.add_argument("--skip-if-exists", action="store_true", help="Skip complete existing metadata.")
+    ap.add_argument("--skip-if-exists", action="store_true", help="Skip existing metadata.")
     ap.add_argument("--clone", action="store_true", help="Clone redis/hiredis if the repo is missing.")
     ap.add_argument("--prepare-repos", action="store_true", help="Prepare repos by bug_id, then exit.")
     ap.add_argument("--list", action="store_true", help="List matching bugs, then exit.")
@@ -1333,17 +1147,11 @@ def main(argv=None) -> int:
 
     args.metadata_dir.mkdir(parents=True, exist_ok=True)
     args.raw_dir.mkdir(parents=True, exist_ok=True)
-    if args.debug_artifacts:
-        args.debug_dir.mkdir(parents=True, exist_ok=True)
-    copy_bug_list(args.metadata_dir, args.raw_dir)
 
     log(f"Will process {len(bugs)} bug(s).")
     log(f"  metadata_dir = {args.metadata_dir}")
     log(f"  raw_dir      = {args.raw_dir}")
     log("  dual_run     = True")
-    if args.debug_artifacts:
-        log(f"  debug_dir    = {args.debug_dir}")
-    log(f"  gcov_scope   = {args.gcov_scope}")
 
     lock_fp = None
     try:
@@ -1356,7 +1164,7 @@ def main(argv=None) -> int:
     try:
         for idx, bug in enumerate(bugs, 1):
             out_path = args.metadata_dir / f"{bug.safe_bug_id}_meta.json"
-            if args.skip_if_exists and _existing_output_is_complete(out_path):
+            if args.skip_if_exists and out_path.exists():
                 log(f"[{idx}/{len(bugs)}] skip existing {bug.bug_id}")
                 ok += 1
                 continue
@@ -1372,7 +1180,6 @@ def main(argv=None) -> int:
                 dual_run=args.dual_run,
                 gcov_scope=args.gcov_scope,
                 test_timeout=args.test_timeout,
-                debug_dir=args.debug_dir if args.debug_artifacts else None,
             )
             if result:
                 ok += 1
