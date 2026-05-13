@@ -34,11 +34,16 @@ Với mỗi bug trong `bugs_list_new.json`:
 3. **Tạo buggy version theo kiểu Defects4C gốc** bằng cách giữ fixed tree và
    chỉ checkout riêng `files.src` sang `commit_before`.
 4. **Build current tree** bằng CMake trong thư mục `build_meta_cjson/`.
-5. **Discover full test suite**
+5. **Discover full test cases**
    * Script gọi `ctest --show-only=json-v1` trên build tree để lấy toàn bộ test
      mà project đã đăng ký.
-   * Với cJSON hiện tại, full suite là 21 test (`cJSON_test`, `parse_*`,
-     `print_*`, `misc_tests`, `json_patch_tests`, `misc_utils_tests`, ...).
+   * Script parse các `RUN_TEST(...)` trong `tests/*.c`, patch test source trong
+     worktree để mỗi executable có thể chạy một Unity case riêng bằng env
+     `BUILD_META_CJSON_TESTCASE`.
+   * Metadata dùng test id dạng `ctest_name::unity_case`, ví dụ
+     `misc_tests::cjson_get_object_item_case_sensitive_should_not_crash_with_array`.
+   * Riêng `cJSON_test` là executable CMake đặc biệt không có `RUN_TEST`, nên
+     được giữ ở mức CTest executable vì đó là mức nhỏ nhất discover được.
 6. **Phase A: lấy outcome**
    * Chạy toàn bộ test của current tree theo danh sách discover từ `ctest`.
    * Nếu bật `--dual-run`, checkout `commit_after`, build fixed version, nhưng
@@ -46,8 +51,11 @@ Với mỗi bug trong `bugs_list_new.json`:
 7. **Phase B: lấy coverage của buggy version**
    * Checkout lại buggy overlay.
    * Build với `GCOV+ASAN`.
-   * Ưu tiên parse `gcov`; nếu process crash quá sớm và không sinh `gcda`, script
-     fallback sang ASAN stack trace để giữ execution footprint tốt hơn `[]`.
+   * Nạp helper `LD_PRELOAD` để bắt `SIGSEGV`, `SIGABRT`, `SIGBUS`, `SIGILL`,
+     `SIGFPE`, `SIGTERM` và gọi `__gcov_dump`/`__gcov_flush` trước khi process
+     thoát, giúp test crash vẫn có cơ hội ghi `.gcda`.
+   * Không fallback sang ASAN stack trace. Nếu không có `.gcda`, `gcov` lỗi,
+     hoặc không parse được function coverage, script dừng bằng lỗi rõ ràng.
 8. **Ghi metadata**
    * `bug_id` lấy từ `type.id` trong `bugs_list_new.json`.
    * Nếu nhiều bug trùng `type.id`, tên file sẽ có suffix `__<sha_after[:12]>`.
@@ -214,6 +222,10 @@ Nếu cần dừng run cũ rồi chạy lại:
 docker exec my_defects4c_cjson bash -lc 'kill <pid>'
 ```
 
+Từ `coverage_parser_version=2`, `--skip-if-exists` chỉ bỏ qua metadata đã có
+đúng version và có coverage khi không bật `--skip-coverage`; metadata cũ sẽ
+được chạy lại.
+
 ## 4. Mapping sang Unified-Debugging
 
 | Field | Cách script ghi |
@@ -221,10 +233,10 @@ docker exec my_defects4c_cjson bash -lc 'kill <pid>'
 | `bug_id` | `type.id` trong `bugs_list_new.json`. |
 | `dataset_name` | `"defects4c"`. |
 | `language` | `"C"`. |
-| `source_file` | `<git_repo_dir_<bug_id>>/<files.src[0]>`. |
+| `source_file` | `/out/DaveGamble___cJSON/git_repo_dir_<bug_id>/<files.src[0]>` trong container, tương ứng `defects4c/out_tmp_dirs/DaveGamble___cJSON/...` trên host. |
 | `compile_cmd` | Lệnh CMake build metadata ghi lại để debug. |
 | `test_cmd_template` | `bash <repo>/run_one_test.sh {test_id}`. |
-| `tests[*].test_id` | Tên test discover từ `ctest`, ví dụ `cJSON_test`, `misc_tests`, `json_patch_tests`. |
+| `tests[*].test_id` | Unity case id dạng `ctest_name::case_name`, ví dụ `misc_tests::cjson_get_object_item_case_sensitive_should_not_crash_with_array`; riêng executable không có `RUN_TEST` giữ tên CTest như `cJSON_test`. |
 | `tests[*].outcome` | Kết quả buggy version trong Phase A. |
 | `tests[*].outcome_fixed` | Kết quả fixed version trong Phase A khi chạy cùng bộ test lấy từ fixed/current tree. |
 | `tests[*].covered_functions` | Coverage buggy version trong Phase B, format `"<file.c>:<func>"`. |

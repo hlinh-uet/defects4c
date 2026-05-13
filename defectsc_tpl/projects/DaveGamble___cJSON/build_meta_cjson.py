@@ -39,6 +39,9 @@ BUGS_JSON = PROJECT_DIR / "bugs_list_new.json"
 REMOTE_URL = "https://github.com/DaveGamble/cJSON.git"
 BUILD_DIR_NAME = "build_meta_cjson"
 DEFAULT_TEST_TIMEOUT = 120
+COVERAGE_PARSER_VERSION = 2
+TEST_CASE_FILTER_ENV = "BUILD_META_CJSON_TESTCASE"
+TEST_GRANULARITY = "unity_case_or_ctest_executable"
 
 COV_CFLAGS = "-g -O0 -fprofile-arcs -ftest-coverage"
 COV_LDFLAGS = "-fprofile-arcs -ftest-coverage"
@@ -53,24 +56,53 @@ _GCOV_FUNC_LINES_RE = re.compile(
     r"Function '(?P<name>[^']+)'\nLines executed:(?P<pct>[0-9.]+)%",
     re.MULTILINE,
 )
-_ASAN_FRAME_RE = re.compile(
-    r"^\s*#\d+\s+0x[0-9a-fA-F]+\s+in\s+(?P<func>\S+)\s+(?P<file>/\S+?):\d+",
-    re.MULTILINE,
-)
-
 _GCOV_DUMP_PRELOAD_C = r"""
 #define _GNU_SOURCE
+#include <dlfcn.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <stddef.h>
 
 extern void __sanitizer_set_death_callback(void (*callback)(void)) __attribute__((weak));
+extern void __gcov_dump(void) __attribute__((weak));
+extern void __gcov_flush(void) __attribute__((weak));
+
+typedef void (*gcov_dump_fn)(void);
+static volatile sig_atomic_t dumping;
+
+static void dump_gcov_data(void) {
+    if (dumping) {
+        return;
+    }
+    dumping = 1;
+
+    if (__gcov_dump != NULL) {
+        __gcov_dump();
+        return;
+    }
+    if (__gcov_flush != NULL) {
+        __gcov_flush();
+        return;
+    }
+
+    gcov_dump_fn dump_fn = (gcov_dump_fn)dlsym(RTLD_DEFAULT, "__gcov_dump");
+    if (dump_fn != NULL) {
+        dump_fn();
+        return;
+    }
+
+    gcov_dump_fn flush_fn = (gcov_dump_fn)dlsym(RTLD_DEFAULT, "__gcov_flush");
+    if (flush_fn != NULL) {
+        flush_fn();
+    }
+}
 
 static void death_callback(void) {
-    exit(1);
+    dump_gcov_data();
 }
 
 static void crash_handler(int sig) {
+    dump_gcov_data();
     exit(128 + sig);
 }
 
@@ -79,9 +111,13 @@ static void install_handlers(void) {
     if (__sanitizer_set_death_callback != NULL) {
         __sanitizer_set_death_callback(death_callback);
     }
-    int sigs[] = {SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE};
-    for (int i = 0; i < sizeof(sigs)/sizeof(sigs[0]); i++) {
-        signal(sigs[i], crash_handler);
+    int sigs[] = {SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE, SIGTERM};
+    struct sigaction sa;
+    sa.sa_handler = crash_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESETHAND;
+    for (size_t i = 0; i < sizeof(sigs)/sizeof(sigs[0]); i++) {
+        sigaction(sigs[i], &sa, NULL);
     }
 }
 """
@@ -115,6 +151,8 @@ class TestEntry:
     source_relpath: str = ""
     command: List[str] = field(default_factory=list)
     working_dir_relpath: str = "."
+    ctest_name: str = ""
+    case_name: str = ""
 
 
 @dataclass
@@ -136,12 +174,12 @@ def _safe_exists(path: Path) -> bool:
 
 
 def _detect_default_out_root() -> Path:
+    container_default = Path("/out") / PROJECT_NAME
+    if _safe_exists(Path("/out")):
+        return container_default
     host_default = DEFECTS4C_ROOT / "out_tmp_dirs" / PROJECT_NAME
     if _safe_exists(host_default):
         return host_default
-    container_default = Path("/out") / PROJECT_NAME
-    if _safe_exists(container_default):
-        return container_default
     return host_default
 
 
@@ -380,13 +418,6 @@ def compile_cjson(repo_dir: Path, *, jobs: int, asan: bool, coverage: bool) -> b
     return True
 
 
-def _test_id_from_source(test_file: str) -> str:
-    base = Path(test_file).name
-    if base.endswith(".c"):
-        base = base[:-2]
-    return base
-
-
 def _relpath_if_possible(path_str: str, repo_dir: Path) -> str:
     p = Path(path_str)
     try:
@@ -395,10 +426,117 @@ def _relpath_if_possible(path_str: str, repo_dir: Path) -> str:
         return path_str
 
 
+def _normalize_c_function(name: str) -> str:
+    name = re.sub(r"\s+", " ", str(name)).strip()
+    if not name:
+        return ""
+    if "(" in name:
+        name = name.split("(", 1)[0].strip()
+    name = re.sub(r"^(static|extern|inline|const|volatile)\s+", "", name)
+    if " " in name:
+        name = name.rsplit(" ", 1)[-1]
+    return name.strip("* ")
+
+
+def _parse_gcov_functions(text: str) -> List[str]:
+    funcs: List[str] = []
+    for match in _GCOV_FUNC_LINES_RE.finditer(text):
+        try:
+            if float(match.group("pct")) > 0.0:
+                funcs.append(_normalize_c_function(match.group("name")))
+        except ValueError:
+            pass
+    if funcs:
+        return sorted(set(fn for fn in funcs if fn))
+
+    for match in _GCOV_FUNC_RE.finditer(text):
+        try:
+            if int(match.group("calls")) > 0:
+                funcs.append(_normalize_c_function(match.group("name")))
+        except ValueError:
+            pass
+    return sorted(set(fn for fn in funcs if fn))
+
+
+def _source_from_gcov_text(text: str) -> str:
+    for line in text.splitlines()[:20]:
+        if "Source:" in line:
+            return line.split("Source:", 1)[1].strip()
+    return ""
+
+
+_RUN_TEST_RE = re.compile(
+    r"(?P<indent>^[ \t]*)RUN_TEST\s*\(\s*(?P<case>[A-Za-z_]\w*)\s*\)\s*;",
+    re.MULTILINE,
+)
+_RUN_TEST_CALL_RE = re.compile(r"\bRUN_TEST\s*\(\s*(?P<case>[A-Za-z_]\w*)\s*\)")
+_CJSON_FILTER_PATCH_MARKER = "BUILD_META_CJSON_TESTCASE_PATCH"
+_CJSON_FILTER_HELPER = f"""
+/* {_CJSON_FILTER_PATCH_MARKER}: generated by build_meta_cjson.py. */
+#include <stdlib.h>
+#include <string.h>
+
+static int build_meta_cjson_should_run(const char *name) {{
+    const char *filter = getenv("{TEST_CASE_FILTER_ENV}");
+    return filter == NULL || filter[0] == '\\0' || strcmp(filter, name) == 0;
+}}
+
+"""
+
+
+def _parse_unity_cases(source_path: Path) -> List[str]:
+    try:
+        text = source_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return sorted(dict.fromkeys(match.group("case") for match in _RUN_TEST_CALL_RE.finditer(text)))
+
+
+def _patch_unity_test_source(source_path: Path) -> List[str]:
+    try:
+        text = source_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise RuntimeError(f"cannot_read_test_source {source_path}: {exc}") from exc
+
+    cases = sorted(dict.fromkeys(match.group("case") for match in _RUN_TEST_CALL_RE.finditer(text)))
+    if not cases:
+        return []
+    if _CJSON_FILTER_PATCH_MARKER in text:
+        return cases
+
+    def repl(match: re.Match) -> str:
+        indent = match.group("indent")
+        case_name = match.group("case")
+        return f'{indent}if (build_meta_cjson_should_run("{case_name}")) {{ RUN_TEST({case_name}); }}'
+
+    patched = _RUN_TEST_RE.sub(repl, text)
+    patched = _CJSON_FILTER_HELPER + patched
+    source_path.write_text(patched, encoding="utf-8")
+    return cases
+
+
+def patch_unity_test_sources(repo_dir: Path) -> Dict[str, List[str]]:
+    tests_dir = repo_dir / "tests"
+    if not tests_dir.is_dir():
+        raise RuntimeError(f"tests_dir_not_found: {tests_dir}")
+
+    cases_by_source: Dict[str, List[str]] = {}
+    for source_path in sorted(tests_dir.glob("*.c")):
+        cases = _patch_unity_test_source(source_path)
+        if cases:
+            rel = source_path.relative_to(repo_dir).as_posix()
+            cases_by_source[rel] = cases
+    if not cases_by_source:
+        raise RuntimeError("no_unity_RUN_TEST_cases_found")
+    return cases_by_source
+
+
 def _discover_tests_from_ctest(repo_dir: Path) -> List[TestEntry]:
     build_dir = repo_dir / BUILD_DIR_NAME
-    if not which("ctest") or not build_dir.exists():
-        return []
+    if not which("ctest"):
+        raise RuntimeError("ctest_not_found")
+    if not build_dir.exists():
+        raise RuntimeError(f"build_dir_not_found: {build_dir}")
 
     rc, out, err = run(
         ["ctest", "--show-only=json-v1", "--test-dir", str(build_dir)],
@@ -407,14 +545,12 @@ def _discover_tests_from_ctest(repo_dir: Path) -> List[TestEntry]:
         timeout=60,
     )
     if rc != 0:
-        log(f"  [tests] ctest discovery failed rc={rc}\n{(out + err)[-2000:]}")
-        return []
+        raise RuntimeError(f"ctest_discovery_failed rc={rc}: {(out + err)[-2000:]}")
 
     try:
         payload = json.loads(out)
     except json.JSONDecodeError as exc:
-        log(f"  [tests] không parse được ctest json: {exc}")
-        return []
+        raise RuntimeError(f"ctest_json_parse_failed: {exc}") from exc
 
     entries: List[TestEntry] = []
     for item in payload.get("tests", []):
@@ -432,46 +568,65 @@ def _discover_tests_from_ctest(repo_dir: Path) -> List[TestEntry]:
             executable_relpath=_relpath_if_possible(command[0], repo_dir),
             command=[str(x) for x in command],
             working_dir_relpath=_relpath_if_possible(str(workdir), repo_dir),
+            ctest_name=name,
         ))
+    if not entries:
+        raise RuntimeError("ctest_discovery_returned_no_tests")
     return entries
 
 
+def _source_relpath_for_ctest(repo_dir: Path, te: TestEntry) -> str:
+    candidates = [
+        repo_dir / "tests" / f"{te.ctest_name or te.test_id}.c",
+        repo_dir / "tests" / f"{Path(te.executable_relpath).name}.c",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.relative_to(repo_dir).as_posix()
+    return ""
+
+
 def discover_tests(repo_dir: Path, bug: BugEntry) -> List[TestEntry]:
-    build_dir = repo_dir / BUILD_DIR_NAME
-    tests = _discover_tests_from_ctest(repo_dir)
-
-    if not tests:
-        # Fallback to the bug metadata if ctest discovery is unavailable.
-        tests = []
-        for test_file in bug.test_files:
-            if test_file.endswith(".c"):
-                test_id = _test_id_from_source(test_file)
-                exe_rel = f"{BUILD_DIR_NAME}/tests/{test_id}"
-                tests.append(TestEntry(
-                    test_id=test_id,
-                    executable_relpath=exe_rel,
-                    source_relpath=test_file,
-                    command=[str(repo_dir / exe_rel)],
-                    working_dir_relpath=f"{BUILD_DIR_NAME}/tests",
-                ))
-
-        if not tests:
-            misc = build_dir / "tests" / "misc_tests"
-            if misc.exists():
-                tests.append(TestEntry(
-                    "misc_tests",
-                    f"{BUILD_DIR_NAME}/tests/misc_tests",
-                    command=[str(misc)],
-                    working_dir_relpath=f"{BUILD_DIR_NAME}/tests",
-                ))
+    suites = _discover_tests_from_ctest(repo_dir)
 
     existing: List[TestEntry] = []
-    for te in tests:
+    for te in suites:
         if (repo_dir / te.executable_relpath).exists():
             existing.append(te)
         else:
-            log(f"  [tests] bỏ qua {te.test_id}: không thấy {te.executable_relpath}")
-    return existing
+            raise RuntimeError(
+                f"ctest_command_missing_for_{te.test_id}: {te.executable_relpath}"
+            )
+    if not existing:
+        raise RuntimeError(f"no_existing_ctest_executables for {bug.bug_id}")
+
+    test_entries: List[TestEntry] = []
+    for te in existing:
+        source_relpath = _source_relpath_for_ctest(repo_dir, te)
+        cases = _parse_unity_cases(repo_dir / source_relpath) if source_relpath else []
+        if not cases:
+            test_entries.append(TestEntry(
+                test_id=te.ctest_name or te.test_id,
+                executable_relpath=te.executable_relpath,
+                source_relpath=source_relpath,
+                command=list(te.command),
+                working_dir_relpath=te.working_dir_relpath,
+                ctest_name=te.ctest_name or te.test_id,
+            ))
+            continue
+        for case_name in cases:
+            test_entries.append(TestEntry(
+                test_id=f"{te.ctest_name or te.test_id}::{case_name}",
+                executable_relpath=te.executable_relpath,
+                source_relpath=source_relpath,
+                command=list(te.command),
+                working_dir_relpath=te.working_dir_relpath,
+                ctest_name=te.ctest_name or te.test_id,
+                case_name=case_name,
+            ))
+    if not test_entries:
+        raise RuntimeError(f"no_unity_case_entries_discovered for {bug.bug_id}")
+    return test_entries
 
 
 def clear_gcda(repo_dir: Path) -> None:
@@ -485,8 +640,7 @@ def clear_gcda(repo_dir: Path) -> None:
 def _ensure_gcov_dump_preload(repo_dir: Path) -> Optional[Path]:
     compiler = which("cc") or which("gcc") or which("clang")
     if not compiler:
-        log("  [cov] không thấy cc/gcc/clang để build gcov preload helper")
-        return None
+        raise RuntimeError("coverage_preload_compiler_not_found")
 
     build_dir = repo_dir / BUILD_DIR_NAME
     build_dir.mkdir(parents=True, exist_ok=True)
@@ -501,8 +655,7 @@ def _ensure_gcov_dump_preload(repo_dir: Path) -> Optional[Path]:
         timeout=60,
     )
     if rc != 0:
-        log(f"  [cov] build preload helper failed rc={rc}\n{(out + err)[-2000:]}")
-        return None
+        raise RuntimeError(f"coverage_preload_build_failed rc={rc}: {(out + err)[-2000:]}")
     return so
 
 
@@ -516,6 +669,8 @@ def run_one_test(
     exe = repo_dir / te.executable_relpath
     env = os.environ.copy()
     env.setdefault("ASAN_OPTIONS", "detect_leaks=0:abort_on_error=0")
+    if te.case_name:
+        env[TEST_CASE_FILTER_ENV] = te.case_name
     if preload_so is not None:
         rc, asan_out, _ = run(["gcc", "-print-file-name=libasan.so"], capture=True)
         asan_so = asan_out.strip()
@@ -579,56 +734,45 @@ def run_tests(
     return results, n_with_cov
 
 
-def _source_candidates(repo_dir: Path, gcda: Path) -> List[Path]:
-    names = []
-    stem = gcda.stem
-    if stem.endswith(".c"):
-        names.append(stem)
-    else:
-        names.append(f"{stem}.c")
-    names.append(gcda.name.replace(".gcda", ""))
-
-    out: List[Path] = []
-    for name in dict.fromkeys(names):
-        local = gcda.parent / name
-        if local.exists():
-            out.append(local)
-        out.extend(repo_dir.rglob(name))
-    return list(dict.fromkeys(out))
-
-
-def collect_coverage(repo_dir: Path) -> Dict[str, List[str]]:
-    if not which("gcov"):
-        return {}
-    gcda_files = list((repo_dir / BUILD_DIR_NAME).rglob("*.gcda"))
-    covered_sets: Dict[str, set[str]] = {}
-
+def _clear_gcov_files(repo_dir: Path) -> None:
     for gcov_file in repo_dir.rglob("*.gcov"):
         try:
             gcov_file.unlink()
         except OSError:
             pass
 
+
+def collect_coverage(repo_dir: Path) -> Dict[str, List[str]]:
+    if not which("gcov"):
+        raise RuntimeError("gcov_not_found")
+    gcda_files = list((repo_dir / BUILD_DIR_NAME).rglob("*.gcda"))
+    if not gcda_files:
+        raise RuntimeError(
+            "no_gcda_files_after_test; crash handler did not flush coverage data"
+        )
+    covered_sets: Dict[str, set[str]] = {}
+
+    _clear_gcov_files(repo_dir)
+
     for gcda in gcda_files:
-        rc, out, _ = run(
+        rc, out, err = run(
             ["gcov", "-f", "-b", "-c", gcda.name],
             cwd=gcda.parent, capture=True, timeout=30,
         )
         if rc != 0:
-            continue
+            raise RuntimeError(
+                f"gcov_failed rc={rc} file={gcda}: {(out + err)[-2000:]}"
+            )
             
+        parsed_gcov = False
         for gcov_file in gcda.parent.glob("*.gcov"):
             try:
                 content = gcov_file.read_text(errors="replace")
             except OSError:
                 continue
+            parsed_gcov = True
                 
-            src_path_str = None
-            for line in content.splitlines()[:15]:
-                if line.lstrip().startswith("-:    0:Source:"):
-                    src_path_str = line.split("Source:", 1)[1].strip()
-                    break
-                    
+            src_path_str = _source_from_gcov_text(content)
             if not src_path_str:
                 continue
                 
@@ -643,29 +787,19 @@ def collect_coverage(repo_dir: Path) -> Dict[str, List[str]]:
                 
             if rel_src not in covered_sets:
                 covered_sets[rel_src] = set()
-                
-            for line in content.splitlines():
-                if line.startswith("function "):
-                    parts = line.split()
-                    if len(parts) >= 4 and parts[2] == "called":
-                        func_name = parts[1]
-                        try:
-                            calls = int(parts[3])
-                            if calls > 0:
-                                covered_sets[rel_src].add(func_name)
-                        except ValueError:
-                            pass
+
+            covered_sets[rel_src].update(_parse_gcov_functions(content))
+        if not parsed_gcov:
+            raise RuntimeError(f"gcov_produced_no_gcov_files for {gcda}")
                             
     covered: Dict[str, List[str]] = {}
     for k, v in covered_sets.items():
         if v:
             covered[k] = sorted(list(v))
 
-    for gcov_file in repo_dir.rglob("*.gcov"):
-        try:
-            gcov_file.unlink()
-        except OSError:
-            pass
+    _clear_gcov_files(repo_dir)
+    if not covered:
+        raise RuntimeError("no_functions_parsed_from_gcov")
     return covered
 
 
@@ -676,26 +810,6 @@ def coverage_to_qualified(cov_map: Dict[str, List[str]]) -> List[str]:
         for fn in funcs:
             out.append(f"{base}:{fn}")
     return sorted(set(out))
-
-
-def fallback_coverage_from_output(output: str, repo_dir: Path) -> List[str]:
-    """Fallback for crashing runs where gcov never gets a gcda file.
-
-    For hard crashes, GCC coverage files are often not flushed at all. When we
-    still have an ASAN stack trace with precise file/line locations, keep those
-    frames as a best-effort execution footprint instead of returning nothing.
-    """
-    repo_prefix = str(repo_dir)
-    covered: List[str] = []
-    for m in _ASAN_FRAME_RE.finditer(output):
-        func = m.group("func")
-        src = m.group("file")
-        if not src.startswith(repo_prefix):
-            continue
-        if func.startswith("__interceptor_"):
-            continue
-        covered.append(f"{os.path.basename(src)}:{func}")
-    return sorted(set(covered))
 
 
 def write_run_one_test(repo_dir: Path, entries: List[TestEntry]) -> None:
@@ -731,6 +845,9 @@ def write_run_one_test(repo_dir: Path, entries: List[TestEntry]) -> None:
         fi
 
         cd "$ROOT/$TEST_CWD"
+        if [[ -n "${{TEST_CASE:-}}" ]]; then
+          export {TEST_CASE_FILTER_ENV}="$TEST_CASE"
+        fi
         exec "${{TEST_CMD[@]}}"
     """), encoding="utf-8")
     script.chmod(0o755)
@@ -748,6 +865,7 @@ def _case_lines(entries: List[TestEntry]) -> str:
             f"{shlex.quote(te.test_id)}) "
             f"EXE_REL={shlex.quote(te.executable_relpath)}; "
             f"TEST_CWD={shlex.quote(workdir)}; "
+            f"TEST_CASE={shlex.quote(te.case_name)}; "
             f"TEST_CMD=({cmd_items}) ;;"
         )
     return "\n".join(lines)
@@ -794,25 +912,22 @@ def _write_meta(path: Path, record: dict) -> None:
     path.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def _empty_record(bug: BugEntry, repo_dir: Path, compile_cmd: str, *, error: str) -> dict:
-    source_file = str(repo_dir / bug.src_files[0]) if bug.src_files else ""
-    return {
-        "bug_id": bug.bug_id,
-        "dataset_name": "defects4c",
-        "language": "C",
-        "project": PROJECT_NAME,
-        "commit_after": bug.sha_after,
-        "commit_before": bug.sha_before,
-        "source_file": source_file,
-        "source_basename": os.path.basename(source_file) if source_file else "",
-        "compile_cmd": compile_cmd,
-        "test_cmd_template": "",
-        "cve": bug.cve_name,
-        "ground_truth_functions": [],
-        "ground_truth": [],
-        "tests": [],
-        "build_error": error,
-    }
+def _existing_metadata_is_current(path: Path, *, require_coverage: bool) -> bool:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    tests = data.get("tests") or []
+    phase_info = data.get("phase_info") or {}
+    if not tests or data.get("build_error"):
+        return False
+    if phase_info.get("test_granularity") != TEST_GRANULARITY:
+        return False
+    if int(phase_info.get("coverage_parser_version") or 0) != COVERAGE_PARSER_VERSION:
+        return False
+    if require_coverage and not any(t.get("covered_functions") for t in tests if isinstance(t, dict)):
+        return False
+    return True
 
 
 def _compile_cmd_for_meta(repo_dir: Path, *, asan: bool, coverage: bool, jobs: int) -> str:
@@ -840,33 +955,28 @@ def process_bug(
     out_path = metadata_dir / f"{bug.safe_bug_id}_meta.json"
     raw_out_path = raw_dir / f"{bug.safe_bug_id}_meta.json"
 
-    try:
-        repo_dir = ensure_repo(bug, out_root, clone=clone)
-    except Exception as exc:
-        log(f"  [error] không tìm/clone được repo: {exc}")
-        return None
+    repo_dir = ensure_repo(bug, out_root, clone=clone)
 
     compile_cmd = _compile_cmd_for_meta(repo_dir, asan=asan or dual_run, coverage=True, jobs=jobs)
 
-    try:
-        checkout_buggy(repo_dir, bug)
-    except Exception as exc:
-        log(f"  [error] checkout buggy lỗi: {exc}")
-        return None
+    checkout_buggy(repo_dir, bug)
+    patch_unity_test_sources(repo_dir)
 
     if dual_run:
         phase_info: Dict[str, object] = {
             "mode": "dual",
             "phase_b_scope": gcov_scope,
             "test_policy": "fixed_tree_tests_for_buggy_and_fixed",
+            "test_granularity": TEST_GRANULARITY,
+            "coverage_parser_version": COVERAGE_PARSER_VERSION,
         }
         log("  [phaseA-buggy] checkout+build ASAN")
         if not compile_cjson(repo_dir, jobs=jobs, asan=True, coverage=False):
-            record = _empty_record(bug, repo_dir, compile_cmd, error="phaseA_buggy_compile_failed")
-            _write_meta(raw_out_path, record)
-            _write_meta(out_path, record)
-            return out_path
+            raise RuntimeError(f"{bug.bug_id}: phaseA_buggy_compile_failed")
         entries = discover_tests(repo_dir, bug)
+        phase_info["test_count"] = len(entries)
+        phase_info["unity_case_count"] = sum(1 for entry in entries if entry.case_name)
+        phase_info["ctest_executable_count"] = sum(1 for entry in entries if not entry.case_name)
         write_run_one_test(repo_dir, entries)
         results_a, _ = run_tests(
             repo_dir, entries, collect_cov=False,
@@ -876,6 +986,7 @@ def process_bug(
         fixed_outcome_by_test: Dict[str, str] = {}
         try:
             checkout_fixed(repo_dir, bug)
+            patch_unity_test_sources(repo_dir)
             log("  [phaseA-fixed] checkout+build ASAN (outcome_fixed)")
             if compile_cjson(repo_dir, jobs=jobs, asan=True, coverage=False):
                 fixed_results, _ = run_tests(
@@ -888,10 +999,10 @@ def process_bug(
                     1 for r in fixed_results if r.outcome == "FAIL"
                 )
             else:
-                phase_info["phase_a_fixed_status"] = "compile_failed"
-                log("  [warn] phaseA-fixed build thất bại, outcome_fixed sẽ rỗng.")
+                raise RuntimeError(f"{bug.bug_id}: phaseA_fixed_compile_failed")
         finally:
             checkout_buggy(repo_dir, bug)
+            patch_unity_test_sources(repo_dir)
 
         cov_by_test: Dict[str, List[str]] = {}
         if skip_coverage:
@@ -909,7 +1020,7 @@ def process_bug(
                 phase_info["phase_b_with_coverage"] = n_cov
                 phase_info["phase_b_test_count"] = len(entries)
             else:
-                phase_info["phase_b_status"] = "compile_failed"
+                raise RuntimeError(f"{bug.bug_id}: phaseB_coverage_compile_failed")
 
         results = [
             TestResult(
@@ -925,13 +1036,18 @@ def process_bug(
         ]
         phase_info["phase_a_fail_count"] = sum(1 for r in results if r.outcome == "FAIL")
     else:
-        phase_info = {"mode": "single", "test_policy": "fixed_tree_tests"}
+        phase_info = {
+            "mode": "single",
+            "test_policy": "fixed_tree_tests",
+            "test_granularity": TEST_GRANULARITY,
+            "coverage_parser_version": COVERAGE_PARSER_VERSION,
+        }
         if not compile_cjson(repo_dir, jobs=jobs, asan=asan, coverage=not skip_coverage):
-            record = _empty_record(bug, repo_dir, compile_cmd, error="compile_failed")
-            _write_meta(raw_out_path, record)
-            _write_meta(out_path, record)
-            return out_path
+            raise RuntimeError(f"{bug.bug_id}: compile_failed")
         entries = discover_tests(repo_dir, bug)
+        phase_info["test_count"] = len(entries)
+        phase_info["unity_case_count"] = sum(1 for entry in entries if entry.case_name)
+        phase_info["ctest_executable_count"] = sum(1 for entry in entries if not entry.case_name)
         write_run_one_test(repo_dir, entries)
         preload_so = _ensure_gcov_dump_preload(repo_dir) if not skip_coverage else None
         results, n_cov = run_tests(
@@ -1049,9 +1165,11 @@ def main(argv=None) -> int:
         for idx, bug in enumerate(bugs, 1):
             out_path = args.metadata_dir / f"{bug.safe_bug_id}_meta.json"
             if args.skip_if_exists and out_path.exists():
-                log(f"[{idx}/{len(bugs)}] skip existing {bug.bug_id}")
-                ok += 1
-                continue
+                if _existing_metadata_is_current(out_path, require_coverage=not args.skip_coverage):
+                    log(f"[{idx}/{len(bugs)}] skip existing {bug.bug_id}")
+                    ok += 1
+                    continue
+                log(f"[{idx}/{len(bugs)}] rerun stale metadata {bug.bug_id}")
             log(f"[{idx}/{len(bugs)}] {bug.bug_id} after={bug.sha_after[:12]}")
             result = process_bug(
                 bug,
