@@ -1,0 +1,48 @@
+# Dockerfile.rocksdb -- slim image for Defects4C project facebook___rocksdb
+#
+# Build:
+#   docker build -f Dockerfile.rocksdb -t rocksdb/defect4c:latest .
+#
+# Run:
+#   docker run -d --name my_defects4c_rocksdb \
+#     --ipc=host \
+#     -v "$(pwd)/defectsc_tpl:/src" \
+#     -v "$(pwd)/out_tmp_dirs:/out" \
+#     -v "$(pwd)/patche_dirs:/patches" \
+#     -v "$(pwd)/unified_debugging:/unified_debugging" \
+#     -v "$(pwd)/../Unified-Debugging:/udbg" \
+#     rocksdb/defect4c:latest sleep infinity
+
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    AM_I_IN_A_DOCKER_CONTAINER=Yes \
+    TZ=UTC \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update -yq && \
+    apt-get install -yq --no-install-recommends \
+      build-essential make gcc g++ \
+      cmake ninja-build \
+      pkg-config \
+      git ca-certificates \
+      jq \
+      findutils coreutils grep sed diffutils gawk \
+      util-linux bash \
+      python3 python3-pip \
+      libgflags-dev \
+      libgtest-dev \
+      libssl-dev \
+      libsnappy-dev zlib1g-dev libbz2-dev liblz4-dev libzstd-dev \
+      libjemalloc-dev libnuma-dev \
+      tzdata && \
+    apt-get autoremove -y && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --no-cache-dir jinja2 jmespath
+
+WORKDIR /src
+
+CMD ["bash"]
