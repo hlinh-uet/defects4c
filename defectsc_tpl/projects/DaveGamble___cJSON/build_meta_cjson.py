@@ -60,36 +60,28 @@ _ASAN_FRAME_RE = re.compile(
 
 _GCOV_DUMP_PRELOAD_C = r"""
 #define _GNU_SOURCE
-#include <dlfcn.h>
 #include <signal.h>
+#include <stdlib.h>
 #include <stddef.h>
 
-typedef void (*gcov_dump_fn_t)(void);
-static gcov_dump_fn_t gcov_dump_ptr = NULL;
 extern void __sanitizer_set_death_callback(void (*callback)(void)) __attribute__((weak));
 
-static void gcov_dump_callback(void) {
-    if (gcov_dump_ptr != NULL) {
-        gcov_dump_ptr();
-    }
+static void death_callback(void) {
+    exit(1);
 }
 
-static void gcov_signal_handler(int sig) {
-    gcov_dump_callback();
-    signal(sig, SIG_DFL);
-    raise(sig);
+static void crash_handler(int sig) {
+    exit(128 + sig);
 }
 
 __attribute__((constructor))
-static void install_gcov_signal_handler(void) {
-    int signals[] = {SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE};
-    size_t i;
-    gcov_dump_ptr = (gcov_dump_fn_t)dlsym(RTLD_DEFAULT, "__gcov_dump");
+static void install_handlers(void) {
     if (__sanitizer_set_death_callback != NULL) {
-        __sanitizer_set_death_callback(gcov_dump_callback);
+        __sanitizer_set_death_callback(death_callback);
     }
-    for (i = 0; i < sizeof(signals) / sizeof(signals[0]); ++i) {
-        signal(signals[i], gcov_signal_handler);
+    int sigs[] = {SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE};
+    for (int i = 0; i < sizeof(sigs)/sizeof(sigs[0]); i++) {
+        signal(sigs[i], crash_handler);
     }
 }
 """
@@ -525,10 +517,18 @@ def run_one_test(
     env = os.environ.copy()
     env.setdefault("ASAN_OPTIONS", "detect_leaks=0:abort_on_error=0")
     if preload_so is not None:
+        rc, asan_out, _ = run(["gcc", "-print-file-name=libasan.so"], capture=True)
+        asan_so = asan_out.strip()
+        
+        new_preload = str(preload_so)
+        if asan_so and asan_so.startswith("/"):
+            new_preload = f"{asan_so}:{new_preload}"
+            
         existing = env.get("LD_PRELOAD", "").strip()
-        env["LD_PRELOAD"] = (
-            f"{preload_so}:{existing}" if existing else str(preload_so)
-        )
+        if existing:
+            new_preload = f"{new_preload}:{existing}"
+            
+        env["LD_PRELOAD"] = new_preload
     cmd = te.command or [str(exe)]
     workdir = repo_dir / te.working_dir_relpath
     if not workdir.exists():
@@ -547,6 +547,7 @@ def run_tests(
     collect_cov: bool,
     test_timeout: int,
     phase_label: str,
+    preload_so: Optional[Path] = None,
 ) -> Tuple[List[TestResult], int]:
     results: List[TestResult] = []
     n_with_cov = 0
@@ -556,13 +557,11 @@ def run_tests(
             repo_dir,
             te,
             timeout=test_timeout,
-            preload_so=None,
+            preload_so=preload_so,
         )
         covered_funcs: List[str] = []
         if collect_cov:
             covered_funcs = coverage_to_qualified(collect_coverage(repo_dir))
-            if not covered_funcs and not passed:
-                covered_funcs = fallback_coverage_from_output(combined_output, repo_dir)
             if covered_funcs:
                 n_with_cov += 1
 
@@ -602,7 +601,7 @@ def collect_coverage(repo_dir: Path) -> Dict[str, List[str]]:
     if not which("gcov"):
         return {}
     gcda_files = list((repo_dir / BUILD_DIR_NAME).rglob("*.gcda"))
-    covered: Dict[str, List[str]] = {}
+    covered_sets: Dict[str, set[str]] = {}
 
     for gcov_file in repo_dir.rglob("*.gcov"):
         try:
@@ -611,37 +610,56 @@ def collect_coverage(repo_dir: Path) -> Dict[str, List[str]]:
             pass
 
     for gcda in gcda_files:
-        funcs_called: List[str] = []
-        src_candidates = _source_candidates(repo_dir, gcda)
-        src_path = next((p for p in src_candidates if p.exists()), None)
         rc, out, _ = run(
             ["gcov", "-f", "-b", "-c", gcda.name],
             cwd=gcda.parent, capture=True, timeout=30,
         )
-        if rc != 0 or src_path is None:
+        if rc != 0:
             continue
-        for m in _GCOV_FUNC_LINES_RE.finditer(out):
+            
+        for gcov_file in gcda.parent.glob("*.gcov"):
             try:
-                if float(m.group("pct")) > 0.0:
-                    funcs_called.append(m.group("name"))
+                content = gcov_file.read_text(errors="replace")
+            except OSError:
+                continue
+                
+            src_path_str = None
+            for line in content.splitlines()[:15]:
+                if line.lstrip().startswith("-:    0:Source:"):
+                    src_path_str = line.split("Source:", 1)[1].strip()
+                    break
+                    
+            if not src_path_str:
+                continue
+                
+            src_p = Path(src_path_str)
+            try:
+                rel_src = src_p.relative_to(repo_dir).as_posix()
             except ValueError:
-                pass
-        if not funcs_called:
-            for m in _GCOV_FUNC_RE.finditer(out):
-                try:
-                    if int(m.group("calls")) > 0:
-                        funcs_called.append(m.group("name"))
-                except ValueError:
-                    pass
-        if not funcs_called:
-            continue
-        try:
-            rel_src = src_path.relative_to(repo_dir).as_posix()
-        except ValueError:
-            rel_src = src_path.name
-        if rel_src.startswith(BUILD_DIR_NAME + "/"):
-            continue
-        covered[rel_src] = sorted(set(funcs_called))
+                rel_src = src_p.name
+                
+            if rel_src.startswith(BUILD_DIR_NAME + "/"):
+                continue
+                
+            if rel_src not in covered_sets:
+                covered_sets[rel_src] = set()
+                
+            for line in content.splitlines():
+                if line.startswith("function "):
+                    parts = line.split()
+                    if len(parts) >= 4 and parts[2] == "called":
+                        func_name = parts[1]
+                        try:
+                            calls = int(parts[3])
+                            if calls > 0:
+                                covered_sets[rel_src].add(func_name)
+                        except ValueError:
+                            pass
+                            
+    covered: Dict[str, List[str]] = {}
+    for k, v in covered_sets.items():
+        if v:
+            covered[k] = sorted(list(v))
 
     for gcov_file in repo_dir.rglob("*.gcov"):
         try:
@@ -881,9 +899,11 @@ def process_bug(
         else:
             log("  [phaseB] checkout buggy + build GCOV+ASAN")
             if compile_cjson(repo_dir, jobs=jobs, asan=True, coverage=True):
+                preload_so = _ensure_gcov_dump_preload(repo_dir)
                 results_b, n_cov = run_tests(
                     repo_dir, entries, collect_cov=True,
                     test_timeout=test_timeout, phase_label="phaseB",
+                    preload_so=preload_so,
                 )
                 cov_by_test = {r.test_id: r.covered_functions for r in results_b}
                 phase_info["phase_b_with_coverage"] = n_cov
@@ -913,9 +933,11 @@ def process_bug(
             return out_path
         entries = discover_tests(repo_dir, bug)
         write_run_one_test(repo_dir, entries)
+        preload_so = _ensure_gcov_dump_preload(repo_dir) if not skip_coverage else None
         results, n_cov = run_tests(
             repo_dir, entries, collect_cov=not skip_coverage,
             test_timeout=test_timeout, phase_label="single",
+            preload_so=preload_so,
         )
         phase_info["with_coverage"] = n_cov
 

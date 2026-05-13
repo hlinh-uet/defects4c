@@ -64,13 +64,14 @@ Với mỗi bug trong `bugs_list_new.json`:
    * Build với `-fprofile-arcs -ftest-coverage`.
    * Trước từng test, xóa `*.gcda`.
    * Sau từng test, chạy `gcov` và ghi `tests[*].covered_functions`.
-   * Nếu test crash quá sớm và không sinh `gcda`, script fallback từ ASAN stack
-     trace nếu output có frame source-level.
+   * Không fallback coverage từ ASAN/output. Test không sinh được `gcda` sẽ có
+     `covered_functions` rỗng để tránh trộn coverage giả với GCOV thật.
 
 7. **Metadata**
    * `bug_id` lấy từ `type.id`.
    * Nếu `type.id` trùng nhau, tên file có suffix `__<sha_after[:12]>`.
    * `raw/` và `metadata/` có cùng nội dung.
+   * File JSON được ghi atomic để tránh Ctrl-C để lại file rỗng.
 
 ## 3. Docker + Run Flow
 
@@ -246,7 +247,7 @@ docker exec my_defects4c_php bash -lc 'kill <pid>'
 |---|---|
 | `bug_id` | `type.id` trong `bugs_list_new.json`. |
 | `source_file` | File đầu tiên trong `files.src`, path tuyệt đối trong repo đang xử lý. |
-| `ground_truth_functions` | Best-effort từ hunk header của `git diff commit_before..commit_after -- files.src`. |
+| `ground_truth_functions` | Từ hunk header của `git diff`; nếu hunk header không có function, fallback sang `func_start/hunk_start` trong `bugs_list_new.json` và scan function tại `commit_after`. |
 | `tests[*].outcome` | Kết quả chạy buggy overlay. |
 | `tests[*].outcome_fixed` | Kết quả chạy fixed tree khi bật `--dual-run`. |
 | `tests[*].covered_functions` | Coverage function của buggy overlay từ Phase B. |

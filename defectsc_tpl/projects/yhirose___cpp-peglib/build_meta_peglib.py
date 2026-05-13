@@ -813,6 +813,8 @@ def _repo_relative_from_gcov(file_name: str, repo_dir: Path, gcda: Path) -> Opti
     raw = file_name.strip()
     if not raw or raw.startswith("<"):
         return None
+    if _is_coverage_excluded_file(raw):
+        return None
     candidates: List[Path] = []
     p = Path(raw)
     if p.is_absolute():
@@ -826,10 +828,22 @@ def _repo_relative_from_gcov(file_name: str, repo_dir: Path, gcda: Path) -> Opti
             rel = resolved.relative_to(repo_dir.resolve()).as_posix()
         except (OSError, ValueError):
             continue
-        if rel.startswith(".git/") or rel.startswith(f"{BUILD_DIR_NAME}/"):
+        if _is_coverage_excluded_file(rel):
             return None
         return rel
     return None
+
+
+def _is_coverage_excluded_file(path: str) -> bool:
+    rel = str(path).replace("\\", "/").lstrip("./")
+    base = os.path.basename(rel)
+    return (
+        rel.startswith(".git/")
+        or rel.startswith(f"{BUILD_DIR_NAME}/")
+        or rel.startswith("test/")
+        or "/test/" in rel
+        or base == "catch.hh"
+    )
 
 
 def _parse_gcov_output(output: str, repo_dir: Path, gcda: Path) -> Dict[str, List[str]]:
@@ -857,7 +871,7 @@ def _parse_gcov_output(output: str, repo_dir: Path, gcda: Path) -> Dict[str, Lis
                 pct = 0.0
             if pct > 0.0:
                 rel_file, func_name = pending_func
-                covered.setdefault(rel_file, []).append(func_name)
+                covered.setdefault(rel_file, []).append(_normalize_cpp_function(func_name))
             pending_func = None
             continue
 
@@ -868,7 +882,7 @@ def _parse_gcov_output(output: str, repo_dir: Path, gcda: Path) -> Dict[str, Lis
             except ValueError:
                 calls = 0
             if calls > 0:
-                covered.setdefault(current_file, []).append(m_called.group("name"))
+                covered.setdefault(current_file, []).append(_normalize_cpp_function(m_called.group("name")))
 
     return {fname: sorted(set(funcs)) for fname, funcs in covered.items()}
 
@@ -895,7 +909,7 @@ def _parse_gcov_json(path: Path, repo_dir: Path, gcda: Path) -> Dict[str, List[s
                 continue
             name = fn.get("demangled_name") or fn.get("name")
             if name:
-                funcs.append(str(name))
+                funcs.append(_normalize_cpp_function(str(name)))
         if funcs:
             covered.setdefault(rel_file, []).extend(funcs)
     return {fname: sorted(set(funcs)) for fname, funcs in covered.items()}
@@ -988,6 +1002,24 @@ def coverage_to_qualified(cov_map: Dict[str, List[str]]) -> List[str]:
     return sorted(set(out))
 
 
+def fallback_coverage_from_output(output: str, repo_dir: Path) -> List[str]:
+    covered: List[str] = []
+    repo_resolved = repo_dir.resolve()
+    for m in _ASAN_FRAME_RE.finditer(output):
+        func = m.group("func").strip()
+        file_path = Path(m.group("file"))
+        try:
+            rel = file_path.resolve().relative_to(repo_resolved).as_posix()
+        except (OSError, ValueError):
+            continue
+        if _is_coverage_excluded_file(rel):
+            continue
+        if func.startswith("__interceptor_"):
+            continue
+        covered.append(f"{os.path.basename(rel)}:{func}")
+    return sorted(set(covered))
+
+
 def _script_arg(arg: str, repo_dir: Path) -> str:
     try:
         rel = Path(arg).relative_to(repo_dir).as_posix()
@@ -1042,25 +1074,264 @@ def write_run_one_test(repo_dir: Path, entries: List[TestEntry]) -> None:
     script.chmod(0o755)
 
 
+def _normalize_cpp_function(name: str) -> str:
+    """Strip C++ noise from a function name to produce a short canonical form.
+
+    Removes: parameter list, return type, template arguments, leading
+    keywords, peglib-specific namespace prefixes, and common internal
+    namespace prefixes.
+    """
+    name = re.sub(r"\s+", " ", str(name)).strip()
+    if not name:
+        return ""
+    name = _strip_cpp_parameter_list(name)
+    name = re.sub(r"^(virtual|static|constexpr|const|inline|typename)\s+", "", name)
+    # Strip peglib library namespace prefix
+    if name.startswith("peg::"):
+        name = name[len("peg::"):]
+    name = _drop_cpp_return_type(name)
+    name = _strip_cpp_template_args(name)
+    # Strip common internal / anonymous namespace prefixes
+    for internal_prefix in ("detail::", "internal::", "Catch::", "(anonymous namespace)::"):
+        if name.startswith(internal_prefix):
+            name = name[len(internal_prefix):]
+            break
+    return name.strip()
+
+
+def _strip_cpp_parameter_list(name: str) -> str:
+    angle_depth = 0
+    for idx, ch in enumerate(name):
+        if ch == "<":
+            angle_depth += 1
+        elif ch == ">" and angle_depth:
+            angle_depth -= 1
+        elif ch == "(" and angle_depth == 0:
+            if name[max(0, idx - 8):idx] == "operator":
+                continue
+            return name[:idx].strip()
+    return name
+
+
+def _drop_cpp_return_type(name: str) -> str:
+    if "operator " in name:
+        return name
+    angle_depth = 0
+    last_top_level_space = -1
+    for idx, ch in enumerate(name):
+        if ch == "<":
+            angle_depth += 1
+        elif ch == ">" and angle_depth:
+            angle_depth -= 1
+        elif ch.isspace() and angle_depth == 0:
+            last_top_level_space = idx
+    if last_top_level_space >= 0:
+        candidate = name[last_top_level_space + 1:].strip()
+        if candidate:
+            return candidate
+    return name
+
+
+def _strip_cpp_template_args(name: str) -> str:
+    out: List[str] = []
+    angle_depth = 0
+    for ch in name:
+        if ch == "<":
+            angle_depth += 1
+            continue
+        if ch == ">" and angle_depth:
+            angle_depth -= 1
+            continue
+        if angle_depth == 0:
+            out.append(ch)
+    return re.sub(r"\s+", " ", "".join(out)).strip()
+
+
 def _extract_ground_truth_funcs(bug: BugEntry, repo_dir: Path) -> List[str]:
     if not bug.sha_before or not bug.src_files:
         return []
-    rc, diff, _ = run(
-        ["git", "diff", bug.sha_before, bug.sha_after, "--", *bug.src_files],
-        cwd=repo_dir,
-        capture=True,
-    )
-    if rc != 0 or not diff:
-        return []
     funcs = set()
-    c_keywords = {"if", "for", "while", "switch", "return", "sizeof", "case", "do"}
-    for line in diff.splitlines():
-        if line.startswith("@@"):
+    source_cache: Dict[str, str] = {}
+    rc, diff, _ = run(["git", "diff", bug.sha_before, bug.sha_after, "--", *bug.src_files], cwd=repo_dir)
+    if rc == 0 and diff:
+        changed_lines = _changed_new_lines_from_diff(diff)
+        for src_file, line_numbers in changed_lines.items():
+            if src_file not in bug.src_files:
+                continue
+            if src_file not in source_cache:
+                rc_show, text, _ = run(["git", "show", f"{bug.sha_after}:{src_file}"], cwd=repo_dir)
+                source_cache[src_file] = text if rc_show == 0 else ""
+            for line_no in line_numbers:
+                fn = _find_enclosing_cpp_function(source_cache[src_file], line_no)
+                if fn:
+                    funcs.add(fn)
+                    break
+
+        for line in diff.splitlines():
+            if not line.startswith("@@"):
+                continue
+            if funcs:
+                break
             tail = line.split("@@", 2)[-1].strip()
-            m = re.match(r".*?\b([A-Za-z_]\w*)\s*\(", tail)
-            if m and m.group(1) not in c_keywords:
-                funcs.add(m.group(1))
+            header_func = _function_from_diff_tail(tail)
+            hunk = re.match(r"@@\s+-\d+(?:,\d+)?\s+\+(?P<start>\d+)(?:,(?P<count>\d+))?", line)
+            if not hunk:
+                if header_func:
+                    funcs.add(header_func)
+                continue
+            start = int(hunk.group("start"))
+            count = int(hunk.group("count") or "1")
+            found_scoped = False
+            for src_file in bug.src_files:
+                if src_file not in source_cache:
+                    rc_show, text, _ = run(["git", "show", f"{bug.sha_after}:{src_file}"], cwd=repo_dir)
+                    source_cache[src_file] = text if rc_show == 0 else ""
+                for candidate_line in range(start, start + max(count, 1)):
+                    fn = _find_enclosing_cpp_function(source_cache[src_file], candidate_line)
+                    if fn:
+                        funcs.add(fn)
+                        found_scoped = True
+                        break
+            if header_func and not found_scoped:
+                funcs.add(header_func)
+
+    if not funcs:
+        loc = (bug.raw.get("files") or {}).get("src0_location") or {}
+        line_no = loc.get("line_number") or loc.get("hunk_start") or loc.get("func_start")
+        if line_no:
+            for src_file in bug.src_files:
+                rc_show, text, _ = run(["git", "show", f"{bug.sha_after}:{src_file}"], cwd=repo_dir)
+                if rc_show == 0:
+                    fn = _find_enclosing_cpp_function(text, int(line_no))
+                    if fn:
+                        funcs.add(fn)
+
     return sorted(funcs)
+
+
+def _changed_new_lines_from_diff(diff: str) -> Dict[str, List[int]]:
+    changed: Dict[str, List[int]] = {}
+    current_file = ""
+    new_line = 0
+
+    for line in diff.splitlines():
+        if line.startswith("+++ b/"):
+            current_file = line[len("+++ b/"):].strip()
+            changed.setdefault(current_file, [])
+            continue
+        hunk = re.match(r"@@\s+-\d+(?:,\d+)?\s+\+(?P<start>\d+)(?:,\d+)?\s+@@", line)
+        if hunk:
+            new_line = int(hunk.group("start"))
+            continue
+        if not current_file or not new_line:
+            continue
+        if line.startswith("+") and not line.startswith("+++"):
+            changed.setdefault(current_file, []).append(new_line)
+            new_line += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            changed.setdefault(current_file, []).append(new_line)
+        elif line.startswith(" "):
+            new_line += 1
+    return {path: sorted(set(lines)) for path, lines in changed.items() if lines}
+
+
+def _function_from_diff_tail(tail: str) -> str:
+    if not tail:
+        return ""
+    keywords = {"if", "for", "while", "switch", "return", "sizeof", "case", "do"}
+    match = re.search(r"([A-Za-z_~][\w:~<>]*)\s*\(", tail)
+    if not match:
+        return ""
+    name = _normalize_cpp_function(match.group(1))
+    leaf = name.rsplit("::", 1)[-1]
+    return "" if leaf in keywords else name
+
+
+def _find_enclosing_cpp_function(source: str, line_number: int) -> str:
+    if not source or line_number <= 0:
+        return ""
+    line_functions = _build_cpp_function_line_map(source)
+    return line_functions.get(line_number, "")
+
+
+def _build_cpp_function_line_map(source: str) -> Dict[int, str]:
+    if not source:
+        return {}
+    lines = source.splitlines()
+    line_functions: Dict[int, str] = {}
+    scope_stack: List[Tuple[int, str]] = []
+    function_stack: List[Tuple[int, str]] = []
+    brace_depth = 0
+    pending = ""
+    namespace_re = re.compile(r"\bnamespace\s+([A-Za-z_]\w*)\b")
+    type_re = re.compile(r"\b(?:class|struct)\s+([A-Za-z_]\w*)\b")
+
+    for line_no, raw_line in enumerate(lines, 1):
+        line = re.sub(r"//.*", "", raw_line)
+        line = re.sub(r"/\*.*?\*/", " ", line)
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            pending = ""
+            if function_stack:
+                line_functions[line_no] = function_stack[-1][1]
+            continue
+
+        before_open = ""
+        if "{" in stripped:
+            before_open = f"{pending} {stripped.split('{', 1)[0]}".strip()
+
+        namespace_match = namespace_re.search(before_open)
+        type_match = type_re.search(before_open)
+        opens = line.count("{")
+        closes = line.count("}")
+
+        if opens:
+            if namespace_match:
+                scope_stack.append((brace_depth + 1, namespace_match.group(1)))
+            elif type_match:
+                scope_stack.append((brace_depth + 1, type_match.group(1)))
+            else:
+                fn = _function_from_signature(before_open)
+                if fn:
+                    if "::" not in fn and scope_stack:
+                        fn = _normalize_cpp_function(
+                            f"{'::'.join(name for _, name in scope_stack)}::{fn}"
+                        )
+                    function_stack.append((brace_depth + 1, fn))
+
+        brace_depth += opens - closes
+        while function_stack and brace_depth < function_stack[-1][0]:
+            function_stack.pop()
+        while scope_stack and brace_depth < scope_stack[-1][0]:
+            scope_stack.pop()
+
+        if "{" in stripped or "}" in stripped or stripped.endswith(";"):
+            pending = ""
+        else:
+            pending = f"{pending} {stripped}".strip()
+
+        if function_stack:
+            line_functions[line_no] = function_stack[-1][1]
+
+    return line_functions
+
+
+def _function_from_signature(signature: str) -> str:
+    signature = re.sub(r"//.*", "", signature)
+    signature = re.sub(r"/\*.*?\*/", " ", signature)
+    signature = re.sub(r"\s+", " ", signature).strip()
+    if not signature or signature.startswith(("if ", "for ", "while ", "switch ", "return ")):
+        return ""
+    before_args = _strip_cpp_parameter_list(signature)
+    if "[" in before_args or "]" in before_args or before_args.endswith("="):
+        return ""
+    name = _normalize_cpp_function(before_args)
+    if not name:
+        return ""
+    leaf = name.rsplit("::", 1)[-1]
+    if leaf in {"if", "for", "while", "switch", "return", "sizeof"}:
+        return ""
+    return name
 
 
 def _test_to_dict(r: TestResult) -> dict:
