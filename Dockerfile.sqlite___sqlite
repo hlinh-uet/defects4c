@@ -1,0 +1,62 @@
+# ----------------------------------------------------------------------
+# Dockerfile.sqlite___sqlite - slim image for Defects4C project sqlite___sqlite
+#
+# This image is intentionally much smaller than the generic Defects4C image.
+# It only includes the toolchain needed to build SQLite, create testfixture,
+# run Tcl-based SQLite tests, and collect GCC/gcov coverage later.
+#
+# Build:
+#   docker build -f Dockerfile.sqlite___sqlite -t defects4c-sqlite-sqlite:latest .
+#
+# Run:
+#   docker run -d --name my_defects4c_sqlite___sqlite \
+#     --ipc=host \
+#     -v "$(pwd)/defectsc_tpl:/src" \
+#     -v "$(pwd)/out_tmp_dirs:/out" \
+#     -v "$(pwd)/patche_dirs:/patches" \
+#     -v "$(pwd)/../Unified-Debugging:/udbg" \
+#     defects4c-sqlite-sqlite:latest sleep infinity
+# ----------------------------------------------------------------------
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    AM_I_IN_A_DOCKER_CONTAINER=Yes \
+    TZ=UTC \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# TclX is in the Ubuntu universe repository. Keep this in a separate layer so
+# package resolution is explicit before installing the actual SQLite toolchain.
+RUN apt-get update -yq && \
+    apt-get install -yq --no-install-recommends \
+      ca-certificates software-properties-common && \
+    add-apt-repository -y universe && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update -yq && \
+    apt-get install -yq --no-install-recommends \
+      build-essential make gcc g++ \
+      autoconf automake libtool pkg-config \
+      git ca-certificates \
+      jq \
+      findutils coreutils grep sed diffutils gawk \
+      util-linux bash \
+      python3 python3-pip \
+      tzdata \
+      tcl tcl-dev tclx8.4 tclx8.4-dev \
+      gdb \
+      zlib1g-dev libreadline-dev && \
+    apt-get autoremove -y && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --no-cache-dir jinja2 jmespath
+
+# Mount points:
+#   /src     <- defectsc_tpl
+#   /out     <- out_tmp_dirs
+#   /patches <- patche_dirs
+#   /udbg    <- Unified-Debugging
+WORKDIR /src
+
+CMD ["bash"]
