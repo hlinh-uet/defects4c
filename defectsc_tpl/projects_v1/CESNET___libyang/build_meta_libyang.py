@@ -705,12 +705,13 @@ RUN_ONE_TEST_SH = textwrap.dedent(r"""
     HERE=$(cd "$(dirname "$0")" && pwd)
     TEST_ID="${1:?Usage: $0 <test_id>}"
     BUILD_DIR="$HERE/__BUILD_DIR_NAME__"
+    TEST_TIMEOUT="${BUILD_META_TEST_TIMEOUT:-180}"
     if [[ "$TEST_ID" == *"::"* ]]; then
       CTEST_NAME="${TEST_ID%%::*}"
       CASE_NAME="${TEST_ID#*::}"
-      OUTPUT=$(BUILD_META_CMOCKA_TEST_FILTER="$CASE_NAME" "$BUILD_DIR/tests/$CTEST_NAME" 2>&1)
+      OUTPUT=$(BUILD_META_CMOCKA_TEST_FILTER="$CASE_NAME" timeout --kill-after=10s "${TEST_TIMEOUT}s" "$BUILD_DIR/tests/$CTEST_NAME" 2>&1)
     else
-      OUTPUT=$(ctest --test-dir "$BUILD_DIR" -R "^${TEST_ID}$" -V --timeout 120 2>&1)
+      OUTPUT=$(ctest --test-dir "$BUILD_DIR" -R "^${TEST_ID}$" -V --timeout "$TEST_TIMEOUT" 2>&1)
     fi
     STATUS=$?
     echo "$OUTPUT"

@@ -42,9 +42,10 @@ REMOTE_URL = "https://github.com/fmtlib/fmt.git"
 BUILD_DIR_NAME = "build_meta_fmt"
 GCOV_SIGNAL_HEADER = "__build_meta_gcov_signal_dump.h"
 
-COV_CFLAGS = "-g -O0 -fprofile-arcs -ftest-coverage -Wno-error"
+BASE_CFLAGS = "-g -O0 -Wno-error -fsigned-char"
+COV_CFLAGS = f"{BASE_CFLAGS} -fprofile-arcs -ftest-coverage"
 COV_LDFLAGS = "-fprofile-arcs -ftest-coverage -lgcov"
-ASAN_CFLAGS = "-g -O0 -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -Wno-error"
+ASAN_CFLAGS = f"{BASE_CFLAGS} -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
 ASAN_LDFLAGS = "-fsanitize=address,undefined"
 ASAN_GTEST_FILTERS = {
     # This fixed-tree subtest intentionally requests an enormous allocation.
@@ -185,6 +186,12 @@ def run(cmd, *, cwd=None, env=None, check=False, timeout=None, capture=True):
             errors="replace" if capture else None,
             timeout=timeout,
         )
+    except FileNotFoundError as exc:
+        missing = args[0] if args else str(exc)
+        return 127, "", (
+            f"Command not found: {missing}. Install it on this host or run inside "
+            "the fmt Defects4C Docker container documented in README.md."
+        )
     except subprocess.TimeoutExpired as exc:
         return 124, "", f"TimeoutExpired: {exc}"
     except UnicodeDecodeError as exc:
@@ -199,6 +206,19 @@ def run(cmd, *, cwd=None, env=None, check=False, timeout=None, capture=True):
             f"stdout: {out[-2000:]}\nstderr: {err[-2000:]}"
         )
     return rc, out, err
+
+
+def check_required_tools() -> bool:
+    required = ["git", "cmake", "ninja", "ctest", "gcc", "g++", "gcov"]
+    missing = [tool for tool in required if shutil.which(tool) is None]
+    if not missing:
+        return True
+    log(f"[error] Missing required tool(s): {', '.join(missing)}")
+    log(
+        "[error] For fmt metadata builds, either install the missing tools on the host "
+        "or run this script in the fmt Docker container from README.md."
+    )
+    return False
 
 
 def load_bugs() -> List[BugEntry]:
@@ -299,7 +319,7 @@ def compile_project(repo: Path, *, jobs: int, asan: bool, coverage: bool, timeou
     env = os.environ.copy()
     env["CC"] = env.get("CC", "gcc")
     env["CXX"] = env.get("CXX", "g++")
-    cflags = "-g -O0 -Wno-error"
+    cflags = BASE_CFLAGS
     ldflags = ""
     if coverage:
         signal_header = write_gcov_signal_header(repo)
@@ -496,12 +516,15 @@ def list_gtest_cases(entry: CTestEntry, timeout: int = 60) -> List[str]:
 def _parse_gtest_list(text: str) -> List[str]:
     cases: List[str] = []
     suite = ""
+    seen: set[str] = set()
     for raw_line in text.splitlines():
         line = raw_line.rstrip()
         if not line.strip():
             continue
-        if not line.startswith(" ") and line.endswith("."):
-            suite = line.strip()[:-1]
+        if not line.startswith(" "):
+            suite_line = line.split("#", 1)[0].strip()
+            if suite_line.endswith("."):
+                suite = suite_line[:-1]
             continue
         if not suite or not line.startswith(" "):
             continue
@@ -510,7 +533,11 @@ def _parse_gtest_list(text: str) -> List[str]:
             continue
         if suite.startswith("DISABLED_") or case_name.startswith("DISABLED_"):
             continue
-        cases.append(f"{suite}.{case_name}")
+        case_id = f"{suite}.{case_name}"
+        if case_id in seen:
+            continue
+        cases.append(case_id)
+        seen.add(case_id)
     return cases
 
 
@@ -1004,12 +1031,14 @@ RUN_ONE_TEST_SH = textwrap.dedent(r"""
     HERE=$(cd "$(dirname "$0")" && pwd)
     TEST_ID="${1:?Usage: $0 <test_id>}"
     BUILD_DIR="$HERE/__BUILD_DIR_NAME__"
+    TEST_WORK_DIR="$BUILD_DIR/test"
+    TEST_TIMEOUT="${BUILD_META_TEST_TIMEOUT:-180}"
     if [[ "$TEST_ID" == *"::"* ]]; then
       CTEST_NAME="${TEST_ID%%::*}"
       GTEST_FILTER="${TEST_ID#*::}"
-      OUTPUT=$("$BUILD_DIR/bin/$CTEST_NAME" --gtest_filter="$GTEST_FILTER" --gtest_color=no 2>&1)
+      OUTPUT=$(cd "$TEST_WORK_DIR" && timeout --kill-after=10s "${TEST_TIMEOUT}s" "$BUILD_DIR/bin/$CTEST_NAME" --gtest_filter="$GTEST_FILTER" --gtest_color=no 2>&1)
     else
-      OUTPUT=$(ctest --test-dir "$BUILD_DIR" -R "^${TEST_ID}$" -V --timeout 120 2>&1)
+      OUTPUT=$(ctest --test-dir "$BUILD_DIR" -R "^${TEST_ID}$" -V --timeout "$TEST_TIMEOUT" 2>&1)
     fi
     STATUS=$?
     echo "$OUTPUT"
@@ -1320,6 +1349,9 @@ def main(argv=None) -> int:
     if not bugs:
         log("No matching bugs.")
         return 1
+
+    if not check_required_tools():
+        return 4
 
     args.metadata_dir.mkdir(parents=True, exist_ok=True)
     args.raw_dir.mkdir(parents=True, exist_ok=True)

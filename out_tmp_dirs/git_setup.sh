@@ -15,6 +15,34 @@ export HOME=/tmp
 export XDG_CONFIG_HOME=/tmp
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_TERMINAL_PROMPT=0
+
+git_fetch_with_retry() {
+    local sha="$1"
+    local max_attempts="${GIT_SETUP_FETCH_RETRIES:-4}"
+    local attempt=1
+    local delay=5
+
+    while (( attempt <= max_attempts )); do
+        echo "Fetching commit: $sha (attempt $attempt/$max_attempts)"
+        if timeout 1200 git fetch --depth 1 origin "$sha"; then
+            echo "✓ Successfully fetched: $sha"
+            return 0
+        fi
+
+        if (( attempt == max_attempts )); then
+            break
+        fi
+
+        echo "WARN: Fetch failed for $sha; retrying in ${delay}s..."
+        sleep "$delay"
+        attempt=$((attempt + 1))
+        delay=$((delay * 2))
+    done
+
+    echo "ERROR: Failed to fetch commit $sha after $max_attempts attempts"
+    return 1
+}
 
 # Simplified git repository setup with selective commit fetching
 # Usage: ./git_setup.sh <project_name> <commit1> <commit2> [commit3] ...
@@ -80,12 +108,9 @@ fi
 
 echo "Fetching commits..."
 for sha in "${commits[@]}"; do
-    echo "Fetching commit: $sha"
-    if ! timeout 1200 git fetch --depth 1 origin "$sha"; then
-        echo "ERROR: Failed to fetch commit $sha"
+    if ! git_fetch_with_retry "$sha"; then
         exit 1
     fi
-    echo "✓ Successfully fetched: $sha"
 done
 
 echo ""
