@@ -1,0 +1,750 @@
+1. CVE-2017-12896 / bug_f76e7feb41a4
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là isakmp-rfc3948-oobr
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+2. CVE-2017-12893 / bug_6f5ba2b651cd
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là nbns-valgrind
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+3. CVE-2017-12895 / bug_2b62d1dda415
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có các test bị lỗi là icmp-cksum-oobr-1, icmp-cksum-oobr-2, icmp-cksum-oobr-3, icmp-cksum-oobr-4
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+4. CVE-2017-12988 / bug_8934a7d63072
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là telnet-iac-check-oobr
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+5. CVE-2017-12992 / bug_e942fb84fbe3
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là hoobr_ripng_print
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+6. CVE-2017-12994 / bug_ffde45acf334
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là bgp-aigp-oobr
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+7. CVE-2017-12995 / bug_3a76fd7c95fc
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có các test bị lỗi là dns_fwdptr, dns-zlip-1, dns-zlip-2, dns-zlip-3
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+8. CVE-2017-12999 / bug_3b32029db354
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có các test bị lỗi là isis-areaaddr-oobr-1, isis-areaaddr-oobr-2
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+9. CVE-2017-12998 / bug_979dcefd7b25
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là isis-extd-ipreach-oobr
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+10. CVE-2017-12996 / bug_6fca58f5f9c9
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có các test bị lỗi là pimv2-oobr-1, pimv2-oobr-2, pimv2-oobr-3, pimv2-oobr-4
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+11. CVE-2017-13001 / bug_7a923447fd49
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là hoobr_nfs_printfh
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+12. CVE-2017-13000 / bug_a7e5f58f402e
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là 802_15_4-data
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+13. CVE-2017-13000 / bug_851273488322
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là 802_15_4_beacon
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+14. CVE-2017-13004 / bug_42073d54c53a
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có các test bị lỗi là juniper_atm1, juniper_es
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+15. CVE-2017-13005 / bug_b45a9a167ca6
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là hoobr_nfs_xid_map_enter
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+16. CVE-2017-13007 / bug_ca336198e8be
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là pktap-heap-overflow
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+17. CVE-2017-13008 / bug_5edf405d7ed9
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là ieee802.11_rates_oobr
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+18. CVE-2017-13012 / bug_8509ef02eceb
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là extract_read2_asan
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+19. CVE-2017-13015 / bug_985122081165
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là eap_extract_read2_asan
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+20. CVE-2017-13017 / bug_11b426ee05eb
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là dhcp6_reconf_asan
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+21. CVE-2017-13018 / bug_26a6799b9ca8
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là pgm_opts_asan
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+22. CVE-2017-13019 / bug_4601c685e7fd
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là pgm_opts_asan_2
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+23. CVE-2017-13020 / bug_c5dd7bef5e54
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là vtp_asan
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+24. CVE-2017-13021 / bug_67c7126062d5
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là icmp6_mobileprefix_asan
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+25. CVE-2017-13027 / bug_a77ff09c4656
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là lldp_mgmt_addr_tlv_asan
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+26. CVE-2017-13031 / bug_2d669862df7c
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là ip6_frag_asan
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+27. CVE-2017-13032 / bug_1bc78d795cd5
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là radius_attr_asan
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+28. CVE-2017-13023 / bug_b8e559afaeb8
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là mobility_opt_asan
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+29. CVE-2017-13024 / bug_7d3aba9f0689
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là mobility_opt_asan_2
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+30. CVE-2017-13028 / bug_29e5470e6ab8
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là bootp_asan
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+31. CVE-2017-13034 / bug_da6f1a677bfa
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là pgm_group_addr_asan
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+32. CVE-2017-13035 / bug_571a6f33f47e
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là isis_sysid_asan
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+33. CVE-2017-13036 / bug_88b2dac837e8
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là ospf6_decode_v3_asan
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+34. CVE-2017-13038 / bug_7335163a6ef8
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là mlppp-oobr
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+35. CVE-2017-13041 / bug_f4b9e24c7384
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là icmp6_nodeinfo_oobr
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+36. CVE-2017-13042 / bug_39582c04cc5e
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là hncp_dhcpv6data-oobr
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+37. CVE-2017-13044 / bug_c2f6833dddec
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là hncp_dhcpv4data-oobr
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+38. CVE-2017-13046 / bug_d10a0f980fe8
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là bgp_pmsi_tunnel-oobr
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+39. CVE-2017-13049 / bug_aa0858100096
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là rx_ubik-oobr
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+40. CVE-2017-13048 / bug_3c8a2b0e91d8
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là rsvp_fast_reroute-oobr
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+41. CVE-2017-13047 / bug_331530a4076c
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có các test bị lỗi là esis_opt_prot-oobr, esis_snpa_asan-3, esis_snpa_asan-4, esis_snpa_asan-5
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+42. CVE-2017-13051 / bug_289c67202028
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có các test bị lỗi là rsvp_uni-oobr-1, rsvp_uni-oobr-2, rsvp_uni-oobr-3
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+43. CVE-2017-13054 / bug_e6511cc1a950
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là lldp_8023_mtu-oobr
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+44. CVE-2017-13053 / bug_bd4e697ebd6c
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là bgp_vpn_rt-oobr
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+45. CVE-2017-13055 / bug_5d0d76e88ee2
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là isis-extd-isreach-oobr
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+46. CVE-2017-13688 / bug_0cb1b8a434b5
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có các test bị lỗi là olsr-oobr-2, olsr-oobr-1
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).
+
+
+47. CVE-2017-13689 / bug_061e7371a944
+================================================================================
+
+Hãy phân tích project hiện tại. Project đang có test bị lỗi là ikev1_id_ipv6_addr_subnet-oobr
+
+Hãy xác định hàm chứa lỗi và đề xuất patch sửa.
+
+Không sử dụng Git history hoặc truy cập ngoài project tìm kiếm các patch trên internet để áp dụng vào.
+
+Đặc biệt, không được dùng Internet để tra cứu patch, commit, pull request, issue, changelog hoặc phiên bản fixed có sẵn.
+
+Lưu ý không chỉnh sửa, tạo hoặc xóa file. Chỉ trả lời:
+1. Tên và vị trí hàm chứa lỗi.
+2. Patch hoàn chỉnh ở định dạng unified diff (`diff --git ...`).

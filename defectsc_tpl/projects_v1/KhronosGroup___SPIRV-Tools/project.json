@@ -7,7 +7,14 @@
     "before_install": [],
     "c_compile": {
         "build": "build_tpl.jinja",
-        "build_flags": ["-DSPIRV_WERROR=off","-DEFFCEE_BUILD_TESTING=off"],
+        "build_flags": [
+            "-DCMAKE_BUILD_TYPE=Debug",
+            "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+            "-DSPIRV_WERROR=OFF",
+            "-DSPIRV_SKIP_TESTS=OFF",
+            "-DEFFCEE_BUILD_TESTING=OFF",
+            "-DCMAKE_CXX_FLAGS=-Wno-error=maybe-uninitialized"
+        ],
         "test": "ctest",
         "test_flags": [],
         "clean": "git"

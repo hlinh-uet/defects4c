@@ -715,7 +715,7 @@ RUN_ONE_TEST_SH = textwrap.dedent(r"""
     fi
     STATUS=$?
     echo "$OUTPUT"
-    if [[ $STATUS -ne 0 ]] || echo "$OUTPUT" | grep -Eq '\*\*\*Failed|\[  FAILED  \]|FAILED TEST\(S\)|Running 0 test|0 test\(s\) run'; then
+    if [[ $STATUS -ne 0 ]] || echo "$OUTPUT" | grep -Eq '\*\*\*Failed|\[  FAILED  \]|FAILED TEST\(S\)|(^|[^0-9])Running 0 test|(^|[^0-9])0 test\(s\) run'; then
       exit 1
     fi
     exit 0
