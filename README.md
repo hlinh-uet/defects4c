@@ -33,6 +33,67 @@ To assess the effectiveness of state-of-the-art APR techniques on C/C++ faults, 
 
 This section shows how to prepare the Docker environment and run the benchmark locally.
 
+## Materialize a project for Debugging-Framework
+
+`defectsc_tpl/projects/` and `defectsc_tpl/projects_v1/` contain recipes, not
+ready-to-run source trees. Each recipe can describe multiple buggy versions.
+Materialize one version under `data/` by bug ID or `commit_after`:
+
+```bash
+python3 prepare_project.py CESNET___libyang --list
+python3 prepare_project.py CESNET___libyang --bug A.3
+```
+
+Materialize all 15 libyang bug versions in one command:
+
+```bash
+python3 prepare_project.py CESNET___libyang --all
+```
+
+This also writes `data/CESNET___libyang__materialized.json`, which lists every
+generated project path and its bug ID/SHA. Add `--build` to build every version;
+without it, Debugging-Framework builds a version when that version is processed.
+
+The script reuses a matching repository from `out_tmp_dirs`, constructs the buggy
+tree as `commit_after` plus all `files.src` from `commit_before`, and renders the
+recipe's build/test commands into the resulting project. It prints the direct
+project path, for example:
+
+```text
+/home/halinh/Unified_Debugging/defects4c/data/CESNET___libyang__A.3__f128972045a5
+```
+
+Use `--build` to execute the rendered build recipe immediately, or let
+Debugging-Framework run it as part of baseline validation. If a type ID is
+duplicated, select the version with a full or unique-prefix SHA.
+
+Recreate an existing generated version deterministically with `--force`:
+
+```bash
+python3 prepare_project.py CESNET___libyang --bug A.3 --force --build
+```
+
+```bash
+cd ../Debugging-Framework
+python3 -m src run \
+  ../defects4c/data/CESNET___libyang__A.3__f128972045a5 \
+  --output /tmp/A.3.patch
+```
+
+Or process every materialized version from the generated manifest:
+
+```bash
+python3 -m src run-batch \
+  ../defects4c/data/CESNET___libyang__materialized.json \
+  --output-dir /tmp/libyang-patches
+```
+
+Each generated project contains its own `.debugging-framework.json` plus rendered
+build/test scripts under `.debugging-framework/`. Debugging-Framework therefore
+does not need to read Defects4C recipes during validation.
+
+Materialized `data/*` directories are generated artifacts and are ignored by Git.
+
 ## What this setup does
 
 This setup will:

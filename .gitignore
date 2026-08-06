@@ -165,3 +165,5 @@ cython_debug/
 out_tmp_dirs/
 out_tmp_dirs.zip
 .DS_Store
+data/*
+!data/.gitkeep
