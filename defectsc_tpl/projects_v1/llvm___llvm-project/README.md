@@ -55,10 +55,15 @@ python3 defectsc_tpl/projects_v1/llvm___llvm-project/run_debugging_case.py \
 2. Export toàn bộ fixed tree rồi overlay `files.src` từ `commit_before` để tạo
    buggy tree.
 3. Configure LLVM và build `llvm-test-depends` trong image.
-4. Chạy từng regression test khai báo bằng `llvm-lit`.
-5. Xóa buggy build, build fixed tree, chỉ giữ test có oracle
-   `FAIL(buggy) -> PASS(fixed)`, và yêu cầu toàn bộ `llvm/test` pass trên fixed.
-6. Xóa build artifact trước khi publish input.
+4. Chạy từng test defect khai báo bằng `llvm-lit`.
+5. Discover test trong `llvm/test` mà không thực thi full suite, rồi chọn cố định
+   tối đa 70 test bổ sung theo `case_id`.
+6. Chạy cùng tập test bổ sung trên buggy và fixed. Chỉ test pass trên cả hai
+   revision mới được yêu cầu bởi regression command; các baseline failure được
+   ghi thành `--exclude-test` trong metadata và không làm `prepare` thất bại.
+7. Xóa buggy build, build fixed tree và chỉ giữ test defect có oracle
+   `FAIL(buggy) -> PASS(fixed)`.
+8. Xóa build artifact trước khi publish input.
 
 Output:
 
@@ -95,9 +100,10 @@ python3 defectsc_tpl/projects_v1/llvm___llvm-project/run_debugging_case.py \
   trial --sha "$SHA" --command-timeout 7200
 ```
 
-Config luôn khai báo full `llvm/test` làm `regression_test`; target test chỉ là
-bước fail-fast trước full suite. Image ID đã inspect được ghi vào config để
-Framework không âm thầm pull hoặc đổi environment.
+Config không chạy toàn bộ `llvm/test`. `target_test` chạy test defect được khai
+báo; `regression_test` chạy tối đa 70 test bổ sung đã chọn cố định và loại các
+test không pass trên cả buggy lẫn fixed. Image ID đã inspect được ghi vào config
+để Framework không âm thầm pull hoặc đổi environment.
 
 ## Giới hạn hiện tại
 

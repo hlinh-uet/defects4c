@@ -10,6 +10,7 @@ artifacts are deliberately removed before the input is published.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -46,6 +47,7 @@ DEFAULT_IMAGE = "llvm/defect4c:latest"
 PROJECT_NAME = "llvm___llvm-project"
 BUILD_DIR = ".debugging-framework/build"
 LIT_ADAPTER_COMMAND = "defects4c-llvm-lit"
+REGRESSION_TEST_LIMIT = 70
 TEST_EVIDENCE_PATTERN = (
     r"Testing Time:|Expected Passes\s*:\s*[1-9]|Unexpected Failures\s*:\s*[1-9]|"
     r"Unsupported Tests\s*:\s*[1-9]|^(?:PASS|FAIL|XPASS|XFAIL|UNSUPPORTED):|"
@@ -150,15 +152,6 @@ def prepare_case(
             source_files=source_files,
         )
         validate_test_paths(project_root, declared_tests)
-        write_framework_config(
-            config_path,
-            failing_tests=declared_tests,
-            image=image,
-            runtime=runtime,
-            jobs=jobs,
-            build_type=build_type,
-        )
-
         run_commands_logged(
             runtime=runtime,
             image=image,
@@ -180,11 +173,33 @@ def prepare_case(
                 f"{case_id}: none of the declared LLVM tests failed: "
                 + ", ".join(declared_tests)
             )
+        discovered_tests = discover_llvm_tests(
+            runtime=runtime,
+            image=image,
+            project_root=project_root,
+            log_path=work_dir / "test-discovery.log",
+            timeout=command_timeout,
+        )
+        regression_tests = select_regression_tests(
+            discovered_tests,
+            excluded_tests=declared_tests,
+            seed=case_id,
+        )
+        if not regression_tests:
+            raise RuntimeError(f"{case_id}: no supplemental LLVM regression tests found")
+        buggy_regression_outcomes = observe_regression_tests(
+            runtime=runtime,
+            image=image,
+            project_root=project_root,
+            tests=regression_tests,
+            log_path=work_dir / "buggy-regression-tests.log",
+            timeout=command_timeout,
+        )
 
         # Do not hold two LLVM build trees at once. The published project must
         # be clean anyway, so discard the buggy build before checking fixed.
         clear_build_artifacts(project_root)
-        fixed_results = verify_fixed_oracle(
+        fixed_results, fixed_regression_outcomes = verify_fixed_oracle(
             source_repo=source_repo,
             staging=staging,
             bug=bug,
@@ -192,7 +207,8 @@ def prepare_case(
             image=image,
             jobs=jobs,
             build_type=build_type,
-            tests=failed_tests,
+            target_tests=failed_tests,
+            regression_tests=regression_tests,
             timeout=command_timeout,
             log_path=work_dir / "fixed-verification.log",
         )
@@ -209,6 +225,24 @@ def prepare_case(
                 f"{case_id}: no LLVM test has the required buggy-fail/fixed-pass outcome"
             )
 
+        excluded_regression_tests = sorted(
+            test
+            for test in regression_tests
+            if buggy_regression_outcomes.get(test) != "passed"
+            or fixed_regression_outcomes.get(test) != "passed"
+        )
+        if excluded_regression_tests:
+            print(
+                f"[filter] {case_id}: loại khỏi regression vì không pass trên "
+                "cả buggy và fixed: " + ", ".join(excluded_regression_tests),
+                flush=True,
+            )
+        if len(excluded_regression_tests) == len(regression_tests):
+            raise RuntimeError(
+                f"{case_id}: no supplemental LLVM regression test passes on both "
+                "buggy and fixed"
+            )
+
         failure_path.write_text(
             "\n".join(failure_sections[test].rstrip() for test in eligible_tests).rstrip()
             + "\n",
@@ -221,6 +255,8 @@ def prepare_case(
             runtime=runtime,
             jobs=jobs,
             build_type=build_type,
+            regression_tests=regression_tests,
+            excluded_regression_tests=excluded_regression_tests,
         )
 
         clear_build_artifacts(project_root)
@@ -346,13 +382,36 @@ def validation_build_commands(jobs: int, build_type: str) -> list[list[str]]:
     ]
 
 
-def llvm_lit_command(test: str | None = None) -> list[str]:
+def llvm_lit_command(
+    test: str | None = None,
+    *,
+    tests: Iterable[str] = (),
+    excluded_tests: Iterable[str] = (),
+) -> list[str]:
     command = [
         LIT_ADAPTER_COMMAND,
         "--build-dir", BUILD_DIR,
     ]
-    command.append(test or "llvm/test")
+    selected = list(tests)
+    if test is not None and selected:
+        raise ValueError("Cannot combine one LLVM lit test with a regression test set")
+    for excluded in excluded_tests:
+        command.extend(["--exclude-test", excluded])
+    for selected_test in selected:
+        command.extend(["--test", selected_test])
+    if test is not None:
+        command.append(test)
+    if test is None and not selected:
+        raise ValueError("LLVM lit command requires at least one selected test")
     return command
+
+
+def llvm_lit_discovery_command() -> list[str]:
+    return [
+        LIT_ADAPTER_COMMAND,
+        "--build-dir", BUILD_DIR,
+        "--list-tests", "llvm/test",
+    ]
 
 
 def write_framework_config(
@@ -363,7 +422,20 @@ def write_framework_config(
     runtime: str,
     jobs: int,
     build_type: str,
+    regression_tests: Iterable[str],
+    excluded_regression_tests: Iterable[str] = (),
 ) -> None:
+    selected_regression_tests = list(dict.fromkeys(regression_tests))
+    excluded = sorted(set(excluded_regression_tests))
+    if not 1 <= len(selected_regression_tests) <= REGRESSION_TEST_LIMIT:
+        raise ValueError(
+            "LLVM regression set must contain between 1 and "
+            f"{REGRESSION_TEST_LIMIT} tests"
+        )
+    if not set(excluded).issubset(selected_regression_tests):
+        raise ValueError("Excluded LLVM regression tests must be in the selected set")
+    if len(excluded) == len(selected_regression_tests):
+        raise ValueError("At least one LLVM regression test must remain after exclusions")
     config = {
         "schema_version": 6,
         "system": "cmake",
@@ -378,7 +450,10 @@ def write_framework_config(
         ],
         "regression_test": [
             {
-                "command": llvm_lit_command(),
+                "command": llvm_lit_command(
+                    tests=selected_regression_tests,
+                    excluded_tests=excluded,
+                ),
                 "evidence_pattern": TEST_EVIDENCE_PATTERN,
                 "failure_pattern": TEST_FAILURE_PATTERN,
             }
@@ -387,6 +462,95 @@ def write_framework_config(
         "environment": {"mode": "image", "runtime": runtime, "image": image},
     }
     path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+
+
+def discover_llvm_tests(
+    *,
+    runtime: str,
+    image: str,
+    project_root: Path,
+    log_path: Path,
+    timeout: int,
+) -> list[str]:
+    command = llvm_lit_discovery_command()
+    result = run_in_image(runtime, image, project_root, command, timeout=timeout)
+    log_path.write_text(
+        command_section(command, result.returncode, result.stdout), encoding="utf-8"
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"LLVM lit discovery failed; see {log_path}")
+    discovered = sorted(
+        {
+            match.group(1).strip()
+            for match in re.finditer(r"^DISCOVERED\s+(\S+)\s*$", result.stdout, re.MULTILINE)
+            if match.group(1).startswith("llvm/test/")
+        }
+    )
+    if not discovered:
+        raise RuntimeError(f"LLVM lit discovered zero tests; see {log_path}")
+    return discovered
+
+
+def select_regression_tests(
+    discovered_tests: Iterable[str],
+    *,
+    excluded_tests: Iterable[str],
+    seed: str,
+    limit: int = REGRESSION_TEST_LIMIT,
+) -> list[str]:
+    if limit < 1:
+        raise ValueError("LLVM regression test limit must be >= 1")
+    excluded = set(excluded_tests)
+    candidates = sorted(
+        {
+            test.strip()
+            for test in discovered_tests
+            if test.strip().startswith("llvm/test/") and test.strip() not in excluded
+        },
+        key=lambda test: (hashlib.sha256(f"{seed}\0{test}".encode()).digest(), test),
+    )
+    return candidates[:limit]
+
+
+def observe_regression_tests(
+    *,
+    runtime: str,
+    image: str,
+    project_root: Path,
+    tests: list[str],
+    log_path: Path,
+    timeout: int,
+    append: bool = False,
+) -> dict[str, str]:
+    if not tests:
+        raise ValueError("Cannot observe an empty LLVM regression test set")
+    command = llvm_lit_command(tests=tests)
+    result = run_in_image(runtime, image, project_root, command, timeout=timeout)
+    with log_path.open("a" if append else "w", encoding="utf-8") as log:
+        log.write(command_section(command, result.returncode, result.stdout))
+    if result.returncode not in {0, 1}:
+        raise RuntimeError(
+            f"LLVM regression selection exited {result.returncode}; see {log_path}"
+        )
+    if not lit_suite_observed(result.stdout):
+        raise RuntimeError(f"LLVM regression selection was not observed; see {log_path}")
+    outcomes = lit_adapter_outcomes(result.stdout)
+    missing = [test for test in tests if test not in outcomes]
+    if missing:
+        raise RuntimeError(
+            "LLVM regression outcomes are missing for: " + ", ".join(missing)
+        )
+    return {test: outcomes[test] for test in tests}
+
+
+def lit_adapter_outcomes(output: str) -> dict[str, str]:
+    labels = {"PASSED": "passed", "FAILED": "failed", "SKIPPED": "skipped"}
+    return {
+        match.group(2): labels[match.group(1)]
+        for match in re.finditer(
+            r"^(PASSED|FAILED|SKIPPED)\s+(\S+)\s*$", output, re.MULTILINE
+        )
+    }
 
 
 def observe_buggy_tests(
@@ -428,10 +592,11 @@ def verify_fixed_oracle(
     image: str,
     jobs: int,
     build_type: str,
-    tests: list[str],
+    target_tests: list[str],
+    regression_tests: list[str],
     timeout: int,
     log_path: Path,
-) -> dict[str, str]:
+) -> tuple[dict[str, str], dict[str, str]]:
     fixed_root = staging / ".fixed-verification-project"
     commit_after = required_sha(bug, "commit_after")
     materialize_snapshot(
@@ -452,7 +617,7 @@ def verify_fixed_oracle(
             timeout=timeout,
         )
         with log_path.open("a", encoding="utf-8") as log:
-            for test in tests:
+            for test in target_tests:
                 command = llvm_lit_command(test)
                 result = run_in_image(runtime, image, fixed_root, command, timeout=timeout)
                 log.write(command_section(command, result.returncode, result.stdout))
@@ -462,16 +627,16 @@ def verify_fixed_oracle(
                     result.stdout, test
                 ) else "failed"
 
-            command = llvm_lit_command()
-            result = run_in_image(runtime, image, fixed_root, command, timeout=timeout)
-            log.write(command_section(command, result.returncode, result.stdout))
-            if not lit_suite_observed(result.stdout):
-                raise RuntimeError("Fixed LLVM regression suite was not observed")
-            if result.returncode != 0:
-                raise RuntimeError(
-                    "Fixed LLVM regression suite failed; see " + str(log_path)
-                )
-        return results
+        regression_outcomes = observe_regression_tests(
+            runtime=runtime,
+            image=image,
+            project_root=fixed_root,
+            tests=regression_tests,
+            log_path=log_path,
+            timeout=timeout,
+            append=True,
+        )
+        return results, regression_outcomes
     finally:
         shutil.rmtree(fixed_root, ignore_errors=True)
 
@@ -636,14 +801,41 @@ def framework_config_ready(config_path: Path) -> bool:
     regression = value.get("regression_test")
     repair = value.get("repair")
     environment = value.get("environment")
-    return bool(
+    if not (
         isinstance(regression, list)
-        and regression
+        and len(regression) == 1
         and isinstance(repair, dict)
         and repair.get("failing_tests")
         and isinstance(environment, dict)
         and environment.get("mode") == "image"
         and environment.get("image")
+    ):
+        return False
+    entry = regression[0]
+    command = entry.get("command") if isinstance(entry, dict) else entry
+    if isinstance(command, str):
+        arguments = shlex.split(command)
+    elif isinstance(command, list):
+        arguments = [str(argument) for argument in command]
+    else:
+        return False
+    selected = [
+        arguments[index + 1]
+        for index, argument in enumerate(arguments[:-1])
+        if argument == "--test"
+    ]
+    excluded = [
+        arguments[index + 1]
+        for index, argument in enumerate(arguments[:-1])
+        if argument == "--exclude-test"
+    ]
+    return bool(
+        1 <= len(selected) <= REGRESSION_TEST_LIMIT
+        and len(selected) == len(set(selected))
+        and set(excluded).issubset(selected)
+        and len(set(excluded)) < len(selected)
+        and "llvm/test" not in arguments
+        and not any("{test_id}" in argument for argument in arguments)
     )
 
 
