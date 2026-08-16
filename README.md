@@ -37,62 +37,54 @@ This section shows how to prepare the Docker environment and run the benchmark l
 
 `defectsc_tpl/projects/` and `defectsc_tpl/projects_v1/` contain recipes, not
 ready-to-run source trees. Each recipe can describe multiple buggy versions.
-Materialize one version under `data/` by bug ID or `commit_after`:
+
+For `CESNET___libyang`, use its unified runner. It materializes a clean buggy
+project, captures an observed failure log in the prepared OCI image, and invokes
+the public `debugging-framework` CLI:
 
 ```bash
-python3 prepare_project.py CESNET___libyang --list
-python3 prepare_project.py CESNET___libyang --bug A.3
+python3 defectsc_tpl/projects_v1/CESNET___libyang/run_debugging_case.py --list
+
+docker build -f Dockerfile.libyang -t libyang/defect4c:latest .
 ```
 
-Materialize all 15 libyang bug versions in one command:
+Create input packages, then let Debugging-Framework manage its own results:
 
 ```bash
-python3 prepare_project.py CESNET___libyang --all
+python3 defectsc_tpl/projects_v1/CESNET___libyang/run_debugging_case.py prepare \
+  --all --continue-on-error --image libyang/defect4c:latest
+
+python3 defectsc_tpl/projects_v1/CESNET___libyang/run_debugging_case.py repair \
+  --all --continue-on-error
 ```
 
-This also writes `data/CESNET___libyang__materialized.json`, which lists every
-generated project path and its bug ID/SHA. Add `--build` to build every version;
-without it, Debugging-Framework builds a version when that version is processed.
+The image installs dependencies once. The 15 cases are separate source/build
+trees and reuse that same image; they are not 15 toolchain installations.
+Inputs are stored under
+`out_tmp_dirs/debugging_framework/libyang/inputs/`. Results remain owned by
+Debugging-Framework and follow its `DEBUGGING_RESULTS_DIR` setting. See the
+[`CESNET___libyang` guide](defectsc_tpl/projects_v1/CESNET___libyang/README.md)
+for the artifact layout, fixed-version verification, and separate metadata /
+coverage workflow. `prepare_project.py` remains available as the generic recipe
+materializer for projects without a strict project-specific adapter.
 
-The script reuses a matching repository from `out_tmp_dirs`, constructs the buggy
-tree as `commit_after` plus all `files.src` from `commit_before`, and renders the
-recipe's build/test commands into the resulting project. It prints the direct
-project path, for example:
-
-```text
-/home/halinh/Unified_Debugging/defects4c/data/CESNET___libyang__A.3__f128972045a5
-```
-
-Use `--build` to execute the rendered build recipe immediately, or let
-Debugging-Framework run it as part of baseline validation. If a type ID is
-duplicated, select the version with a full or unique-prefix SHA.
-
-Recreate an existing generated version deterministically with `--force`:
+For a full-size workspace stress test, `llvm___llvm-project` has its own image
+and strict runner. It keeps the complete monorepo source tree, validates the
+declared `llvm-lit` failure on buggy and fixed revisions, and emits the same
+three-path Debugging-Framework input contract:
 
 ```bash
-python3 prepare_project.py CESNET___libyang --bug A.3 --force --build
+docker build -f Dockerfile.llvm -t llvm/defect4c:latest .
+
+python3 defectsc_tpl/projects_v1/llvm___llvm-project/run_debugging_case.py \
+  prepare --sha ab3fdbdfbe7edc62049c602d87be91c3ad3f5e3b
 ```
 
-```bash
-cd ../Debugging-Framework
-python3 -m src run \
-  ../defects4c/data/CESNET___libyang__A.3__f128972045a5 \
-  --output /tmp/A.3.patch
-```
-
-Or process every materialized version from the generated manifest:
-
-```bash
-python3 -m src run-batch \
-  ../defects4c/data/CESNET___libyang__materialized.json \
-  --output-dir /tmp/libyang-patches
-```
-
-Each generated project contains its own `.debugging-framework.json` plus rendered
-build/test scripts under `.debugging-framework/`. Debugging-Framework therefore
-does not need to read Defects4C recipes during validation.
-
-Materialized `data/*` directories are generated artifacts and are ignored by Git.
+LLVM requires substantially more disk, memory, and build time than libyang.
+The runner uses a shared partial Git cache and removes build artifacts before
+publishing each input. See the
+[`llvm___llvm-project` guide](defectsc_tpl/projects_v1/llvm___llvm-project/README.md)
+before running it, especially when the workspace is stored on the system disk.
 
 ## What this setup does
 

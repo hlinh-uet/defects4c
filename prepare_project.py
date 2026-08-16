@@ -19,9 +19,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-from jinja2 import Environment, FileSystemLoader, StrictUndefined
-
-
 ROOT = Path(__file__).resolve().parent
 RECIPES_ROOT = ROOT / "defectsc_tpl"
 DEFAULT_DATA_ROOT = ROOT / "data"
@@ -443,6 +440,12 @@ def resolve_template(recipe_dir: Path, configured: object, common_name: str) -> 
 
 
 def render(path: Path, context: dict) -> str:
+    try:
+        from jinja2 import Environment, FileSystemLoader, StrictUndefined
+    except ImportError as exc:
+        raise RuntimeError(
+            "Jinja2 is required to render generic Defects4C project recipes"
+        ) from exc
     environment = Environment(
         loader=FileSystemLoader(str(path.parent)),
         undefined=StrictUndefined,
@@ -505,7 +508,10 @@ def required_sha(bug: dict, key: str) -> str:
 
 def git_has_commit(repo: Path, sha: str) -> bool:
     completed = subprocess.run(
-        ["git", "-C", str(repo), "cat-file", "-e", f"{sha}^{{commit}}"],
+        [
+            "git", "-c", "safe.directory=*", "-C", str(repo),
+            "cat-file", "-e", f"{sha}^{{commit}}",
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,

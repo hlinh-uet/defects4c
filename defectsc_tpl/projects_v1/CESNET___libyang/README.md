@@ -1,178 +1,152 @@
-# `CESNET___libyang` — Defects4C × Unified-Debugging
+# CESNET/libyang — thử Debugging-Framework
 
-## 1. Kiến trúc
+Mục tiêu của adapter này rất hẹp:
 
-```
-defects4c/
-├── Dockerfile.libyang                              (★ image SLIM cho libyang)
-├── defectsc_tpl/
-│   └── projects_v1/
-│       └── CESNET___libyang/
-│           ├── bugs_list_new.json                  (15 bug entries)
-│           ├── project.json                        (khai báo build: cmake/ninja/ctest)
-│           ├── build_meta_libyang.py               (★ pipeline sinh metadata)
-│           └── README.md                           (file này)
-├── out_tmp_dirs/
-│   └── CESNET___libyang/
-│       └── git_repo_dir_<sha>/                     (cây nguồn đã clone)
-└── unified_debugging/
-    └── libyang/
-        ├── metadata/                               (output cho Unified-Debugging)
-        └── raw/                                    (output thô)
-```
+1. Defects4C tạo đúng input của một project lỗi.
+2. Debugging-Framework nhận input đó bằng public CLI và tự quản lý output.
 
-## 2. Khác biệt so với tcpdump
+## File trong thư mục
 
-| Tiêu chí | tcpdump | libyang |
-|---|---|---|
-| Build system | autoconf + make | **CMake + Ninja** |
-| Test runner | `tests/TESTLIST` + `TESTonce` | **CTest** (CMocka unit tests) |
-| Dependencies | libpcap-dev | **libpcre2-dev, libcmocka-dev** |
-| Test discovery | Parse `TESTLIST` | `ctest --show-only=json-v1`, rồi expand CMocka cases |
-| Test filter | `bugs_list_new.json` không có test_flags | Mặc định chạy full CTest; có thể dùng `--trigger-tests-only` để debug nhanh |
+| File | Mục đích |
+|---|---|
+| `run_debugging_case.py` | Tạo input và gọi `debugging-framework doctor/repair` |
+| `bugs_list_new.json` | Danh sách 15 defect, commit và failing target |
+| `project.json` | URL repository libyang |
+| `build_meta_libyang.py` | Pipeline metadata/coverage cũ, không dùng khi thử Framework |
+| `test_info.py` | Helper cho metadata cũ, không dùng khi thử Framework |
 
-## 3. Pipeline `build_meta_libyang.py`
+## Chuẩn bị
 
-Với mỗi bug trong `bugs_list_new.json`:
+Docker daemon phải chạy và image phải tồn tại:
 
-1. **Checkout buggy**: fixed tree (`commit_after`) + overlay `src_files` từ `commit_before`
-2. **CMake configure**: `cmake -G Ninja -S . -B build_meta_libyang -DCMAKE_C_FLAGS="-g -O0 -fprofile-arcs -ftest-coverage" -DENABLE_TESTS=ON`
-3. **Ninja build**: `ninja -C build_meta_libyang -jN`
-4. **Test discovery**: `ctest --test-dir build_meta_libyang --show-only=json-v1`, rồi parse `cmocka_unit_test*()`/`UTEST()` trong source để tạo từng `CTestName::case_name`
-5. **Phase A buggy**: chạy từng CMocka test case tuần tự để lấy `tests[*].outcome`
-6. **Phase A fixed**: checkout fixed tree, build lại, chạy cùng danh sách test case để lấy `tests[*].outcome_fixed`
-7. **Phase B coverage**: checkout buggy tree, build lại, chạy từng test case tuần tự; trước mỗi case xóa `.gcda`, sau case đọc coverage bằng `gcov`
-8. **Ghi metadata**: `{safe_bug_id}_meta.json` vào `raw/` và `metadata/`
-
-Script có lock theo `out-root` trong `/tmp`, nên chỉ một process được dùng cùng cây repo/output libyang tại một thời điểm. Có thể dùng `--single-run` hoặc `--trigger-tests-only` nếu cần chạy nhanh để debug.
-
-`--jobs 4` chỉ là số job song song khi build bằng Ninja (`ninja -j4`). Nó không chạy 4 pipeline metadata song song và không chạy 4 test coverage song song. Test vẫn chạy tuần tự từng case để tránh `.gcda` bị ghi đè.
-
-Coverage không dùng fallback từ ASAN stack trace hay nguồn suy luận khác. Nếu `gcov` không có, không có `.gcda`, hoặc parse không ra function, test đó sẽ có `coverage_error` trong metadata và `covered_functions` để rỗng.
-
-Libyang không expose CLI filter cho từng CMocka case. Script áp dụng một patch build-only sau mỗi checkout để biến env `BUILD_META_CMOCKA_TEST_FILTER` thành `cmocka_set_test_filter()`. Patch này chỉ nằm trong working tree tạm của metadata run và được áp dụng nhất quán cho buggy/fixed/coverage builds.
-
-`--skip-if-exists` chỉ skip metadata đã sinh bằng logic case-level hiện tại (`phase_info.test_granularity == "cmocka_case"`). Metadata CTest-level cũ sẽ được phát hiện và chạy lại.
-
-## 4. Docker Setup
-
-### Build image
 ```bash
-cd "/Users/linhnh/Documents/Fault Localization/defects4c"
+cd /Users/linhnh/Developer/Debugging/defects4c
+
+docker image inspect libyang/defect4c:latest
+```
+
+Nếu chưa có image:
+
+```bash
 docker build -f Dockerfile.libyang -t libyang/defect4c:latest .
 ```
 
-### Tạo container
-```bash
-docker rm -f my_defects4c_libyang 2>/dev/null || true
-docker run -d --name my_defects4c_libyang \
-  --ipc=host \
-  -v "$(pwd)/defectsc_tpl:/src" \
-  -v "$(pwd)/out_tmp_dirs:/out" \
-  -v "$(pwd)/patche_dirs:/patches" \
-  -v "$(pwd)/unified_debugging:/unified_debugging" \
-  -v "$(pwd)/../Unified-Debugging:/udbg" \
-  libyang/defect4c:latest sleep infinity
-```
+Container nền `my_defects4c_libyang` không được dùng trong workflow này. Có thể
+để nó chạy; adapter và Framework dùng image để tạo container tạm khi build/test.
 
-### Clone repos (chạy 1 lần)
-```bash
-docker exec my_defects4c_libyang bash -lc \
-  'cd /src && bash bulk_git_clone_v2.sh mini CESNET___libyang'
-```
+## Bước 1: Defects4C chỉ tạo input
 
-## 5. Chạy pipeline
-
-### Chạy thử 1 bug
-```bash
-docker exec my_defects4c_libyang bash -lc '
-  cd /src/projects_v1/CESNET___libyang && \
-  python3 build_meta_libyang.py \
-    --sha 92cc8517fcb85dcfbb93842758571f721c49c9cb \
-    --metadata-dir /out/unified_debugging/libyang/metadata \
-    --raw-dir /out/unified_debugging/libyang/raw \
-    --jobs 4
-'
-```
-
-Lệnh trên mặc định chạy full CTest cho bug đó, gồm buggy outcome, fixed outcome và coverage trên buggy tree.
-
-### Chạy toàn bộ
-```bash
-docker exec my_defects4c_libyang bash -lc '
-  cd /src/projects_v1/CESNET___libyang && \
-  python3 build_meta_libyang.py \
-    --metadata-dir /out/unified_debugging/libyang/metadata \
-    --raw-dir /out/unified_debugging/libyang/raw \
-    --jobs 4 \
-    --skip-if-exists \
-    --clone
-'
-```
-
-Nếu muốn ghi lại toàn bộ output đã có, bỏ `--skip-if-exists`.
-
-### Debug nhanh bằng trigger test
-```bash
-docker exec my_defects4c_libyang bash -lc '
-  cd /src/projects_v1/CESNET___libyang && \
-  python3 build_meta_libyang.py \
-    --sha 92cc8517fcb85dcfbb93842758571f721c49c9cb \
-    --metadata-dir /out/unified_debugging/libyang/metadata \
-    --raw-dir /out/unified_debugging/libyang/raw \
-    --jobs 4 \
-    --trigger-tests-only
-'
-```
-
-## 6. Mapping Unified-Debugging
-
-| Unified-Debugging field | Cách đáp ứng |
-|---|---|
-| `bug_id` | `type.id` trong `bugs_list_new.json` |
-| `dataset_name` | `"defects4c"` |
-| `language` | `"C"` |
-| `source_file` | `<git_repo_dir>/<files.src[0]>` |
-| `compile_cmd` | `cmake + ninja` command |
-| `test_cmd_template` | `bash <repo>/run_one_test.sh {test_id}` |
-| `tests[*].test_id` | CMocka case id dạng `CTestName::case_name` (e.g. `utest_new::test_dup`) |
-| `tests[*].outcome` | `PASS/FAIL` buggy version |
-| `tests[*].outcome_fixed` | `PASS/FAIL` fixed version; `NOT_RUN` chỉ khi dùng `--single-run` hoặc fixed phase lỗi |
-| `tests[*].covered_functions` | `gcov` parse thật → `"file.c:func"` với basename của source file |
-| `tests[*].coverage_error` | Chỉ xuất hiện khi coverage của test đó không thu được |
-| `phase_info.errors` | Lỗi cấp phase như `fixed_compile_failed`, `coverage_compile_failed`, `no_tests_selected` |
-| `ground_truth_functions` | Parse hunk header `git diff` |
-
-## 7. Kiểm tra output
-
-Ví dụ kiểm tra một metadata đã sinh:
+Đứng tại thư mục `defects4c`:
 
 ```bash
-docker exec my_defects4c_libyang bash -lc 'python3 - <<'"'"'PY'"'"'
-import json
-p="/out/unified_debugging/libyang/metadata/D.1__92cc8517fcb8_meta.json"
-d=json.load(open(p))
-print("tests", len(d["tests"]))
-print("missing_fixed", sum(1 for t in d["tests"] if not t.get("outcome_fixed")))
-print("coverage_errors", [(t["test_id"], t.get("coverage_error")) for t in d["tests"] if t.get("coverage_error")])
-print("phase_errors", d.get("phase_info", {}).get("errors"))
-print("buggy_fail", [t["test_id"] for t in d["tests"] if t["outcome"] == "FAIL"])
-print("fixed_fail", [t["test_id"] for t in d["tests"] if t["outcome_fixed"] == "FAIL"])
-PY'
+cd /Users/linhnh/Developer/Debugging/defects4c
+
+python \
+  defectsc_tpl/projects_v1/CESNET___libyang/run_debugging_case.py \
+  prepare \
+  --sha 92cc8517fcb85dcfbb93842758571f721c49c9cb
 ```
 
-Lưu ý: nếu full suite có test fixed vẫn FAIL thì đó là kết quả thật của fixed tree và vẫn được lưu trong `outcome_fixed`; pipeline không tự lọc chỉ test regression.
+Đầu ra của bước này chỉ gồm input:
 
+```text
+out_tmp_dirs/debugging_framework/libyang/inputs/
+├── D.1__92cc8517fcb8/               # buggy project root
+│   ├── CMakeLists.txt
+│   ├── src/
+│   └── tests/
+├── D.1__92cc8517fcb8.debugging-framework.json  # build/test/environment contract
+└── D.1__92cc8517fcb8.failure.log               # failing-test output
+```
 
-Nếu cần dừng run cũ rồi chạy lại, kiểm tra PID trong container libyang:
+Không tạo `results/`, `outputs/`, manifest hay audit logs trong Defects4C.
+Muốn tạo lại input, thêm `--force`.
+
+Config sinh ra dùng `schema_version=6` và lưu đầy đủ contract mà Framework cần:
+
+- `setup`: configure CMake với test enabled;
+- `build`: build bằng Ninja;
+- `target_test`: CTest `-R ^{test_id}$`, chỉ là bước fail-fast tùy chọn;
+- `regression_test`: chạy toàn bộ CTest suite ngoại trừ các test vẫn fail trên
+  fixed commit;
+- `repair.failing_tests` và image/runtime đã chuẩn bị.
+
+Trong lúc `prepare`, adapter luôn chạy cả buggy tree và fixed tree. Chỉ target có
+outcome `FAIL(buggy) -> PASS(fixed)` được ghi vào `repair.failing_tests`. Test
+fail ở cả buggy và fixed bị loại khỏi target lẫn regression contract; các test
+còn lại tạo thành fixed-compatible regression suite. Patch chỉ đạt
+`status=plausible` khi toàn bộ suite hợp lệ này pass. Các input cũ cần chạy lại
+`prepare --force` để nhận contract đã lọc.
+
+## Bước 2: xem đúng public CLI
 
 ```bash
-docker exec my_defects4c_libyang bash -lc \
-  'ps -eo pid,ppid,stat,cmd | grep "[p]ython3 build_meta_libyang.py" || true'
+python \
+  defectsc_tpl/projects_v1/CESNET___libyang/run_debugging_case.py \
+  show \
+  --sha 92cc8517fcb85dcfbb93842758571f721c49c9cb
 ```
 
-Sau đó kill đúng PID trong container libyang:
+## Bước 3: chạy Debugging-Framework trực tiếp
+
+Vẫn đứng tại thư mục `defects4c`:
 
 ```bash
-docker exec my_defects4c_libyang bash -lc 'kill <pid>'
+PROJECT=out_tmp_dirs/debugging_framework/libyang/inputs/D.1__92cc8517fcb8
+CONFIG=out_tmp_dirs/debugging_framework/libyang/inputs/D.1__92cc8517fcb8.debugging-framework.json
+FAILURE=out_tmp_dirs/debugging_framework/libyang/inputs/D.1__92cc8517fcb8.failure.log
+FRAMEWORK=../Debugging-Framework/.venv/bin/debugging-framework
+
+"$FRAMEWORK" doctor "$PROJECT" --config "$CONFIG"
+
+"$FRAMEWORK" repair \
+  --project "$PROJECT" \
+  --config "$CONFIG" \
+  --failure-output "$FAILURE"
 ```
+
+Không truyền `--results-dir` hoặc `--output`. Debugging-Framework tự chọn nơi
+lưu theo cấu hình của nó. Với checkout hiện tại, `.env` của Framework đặt
+`DEBUGGING_RESULTS_DIR=./experiments`, nên kết quả case này nằm tại:
+
+```text
+/Users/linhnh/Developer/Debugging/Debugging-Framework/experiments/D.1__92cc8517fcb8/
+├── patch.diff
+├── result.json
+├── run_manifest.json
+└── attempts/
+```
+
+## Runner gọi hộ Framework
+
+Hai lệnh sau chỉ gọi lại public CLI ở trên, không tự quản lý output:
+
+```bash
+python defectsc_tpl/projects_v1/CESNET___libyang/run_debugging_case.py \
+  doctor --sha 92cc8517fcb85dcfbb93842758571f721c49c9cb
+
+python defectsc_tpl/projects_v1/CESNET___libyang/run_debugging_case.py \
+  repair --sha 92cc8517fcb85dcfbb93842758571f721c49c9cb
+```
+
+Hoặc chạy `prepare → doctor → repair`:
+
+```bash
+python defectsc_tpl/projects_v1/CESNET___libyang/run_debugging_case.py \
+  trial --sha 92cc8517fcb85dcfbb93842758571f721c49c9cb
+```
+
+Khi không truyền các cờ policy, Framework dùng cấu hình của chính nó. Hiện tại
+mặc định là `attempts=2`, model `gpt-5.6-sol`, timeout 1800 giây và `jobs=0`
+(tự chọn theo CPU cho build tự phát hiện). Build command của input libyang vẫn
+ghi `--parallel 4`, là thông số đóng gói project khi chạy `prepare`. Có thể ghi
+đè policy của Framework bằng CLI khi cần.
+
+## Xác nhận buggy version
+
+Adapter checkout toàn bộ repository tại `commit_after`, sau đó ghi đè các file
+trong `files.src` bằng nội dung tại `commit_before`. Với case trên, file được
+hoàn nguyên là `src/tree_schema_compile.c`; target
+`src_tree_schema_compile` được chạy thật và output fail được lưu vào file
+`.failure.log`. Adapter cũng build fixed commit, loại mọi target không pass trên
+fixed và loại các fixed-failing test khỏi `regression_test`.
