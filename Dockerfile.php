@@ -50,16 +50,18 @@ RUN pip3 install --no-cache-dir jinja2 jmespath
 
 # php-src 5.x/7.0 era needs Bison 2.7 for generated Zend parsers. Newer
 # Bison can produce parser objects that fail to link on these old commits.
+COPY defectsc_tpl/projects/php___php-src/bison-2.7-glibc-change-work-around.patch \
+     /tmp/bison-2.7-glibc-change-work-around.patch
 RUN mkdir -p /tmp/bison-build && \
     wget -q https://ftp.gnu.org/gnu/bison/bison-2.7.tar.gz -O /tmp/bison-build/bison-2.7.tar.gz && \
     cd /tmp/bison-build && \
     tar -xf bison-2.7.tar.gz && \
     cd bison-2.7 && \
-    wget -q 'https://raw.githubusercontent.com/rdslw/openwrt/e5d47f32131849a69a9267de51a30d6be1f0d0ac/tools/bison/patches/110-glibc-change-work-around.patch' -O- | git apply - && \
+    git apply /tmp/bison-2.7-glibc-change-work-around.patch && \
     ./configure --prefix=/opt/bison-2.7 && \
     make -j"$(nproc)" && \
     make install && \
-    rm -rf /tmp/bison-build
+    rm -rf /tmp/bison-build /tmp/bison-2.7-glibc-change-work-around.patch
 
 COPY defectsc_tpl/projects/php___php-src/run_php_build.py \
      /usr/local/bin/defects4c-php-build

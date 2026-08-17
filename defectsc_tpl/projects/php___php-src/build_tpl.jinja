@@ -14,8 +14,7 @@ if [[ ! -d $bison_path"/bison-2.7/bison-2.7_bin" ]]; then
 
 	cd "bison-2.7"
 
-	wget 'https://raw.githubusercontent.com/rdslw/openwrt/e5d47f32131849a69a9267de51a30d6be1f0d0ac/tools/bison/patches/110-glibc-change-work-around.patch' -O- \
-	 | git apply -
+	git apply /src/projects/php___php-src/bison-2.7-glibc-change-work-around.patch
 
 
 	./configure --prefix=`pwd`/bison-2.7_bin
@@ -61,6 +60,5 @@ build_flags=" {% for option in build_flags %}{{ option }} {% endfor %} ";
 
 
 make -j {{ cpu_count }} 
-
 
 
