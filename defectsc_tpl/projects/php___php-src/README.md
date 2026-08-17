@@ -255,3 +255,58 @@ docker exec my_defects4c_php bash -lc 'kill <pid>'
 | `tests[*].outcome_fixed` | Kết quả chạy fixed tree khi bật `--dual-run`. |
 | `tests[*].covered_functions` | Coverage function của buggy overlay từ Phase B; crash signal được flush best-effort bằng `__gcov_dump()`. |
 | `test_cmd_template` | `bash <repo>/run_one_test.sh {test_id}`. |
+
+## 8. Tạo input cho Debugging Framework
+
+Workflow này độc lập với metadata Unified-Debugging ở trên. Build lại image để
+cài hai adapter `defects4c-php-build` và `defects4c-php-test`:
+
+```bash
+docker build -f Dockerfile.php -t php-src/defect4c:latest .
+```
+
+Liệt kê 18 case:
+
+```bash
+python3 defectsc_tpl/projects/php___php-src/run_debugging_case.py --list
+```
+
+Chuẩn bị một input:
+
+```bash
+python3 defectsc_tpl/projects/php___php-src/run_debugging_case.py \
+  prepare --sha 28a6ed9f9a36b9c517e4a8a429baf4dd382fc5d5
+```
+
+`prepare` thực hiện:
+
+1. Tạo một partial Git cache dùng chung tại
+   `out_tmp_dirs/php___php-src/source-cache`. Mỗi snapshot được export bằng
+   `git archive`, không clone/copy Git object database vào input.
+2. Materialize fixed tree rồi overlay `files.src` từ `commit_before`.
+3. Build buggy bằng đúng `c_compile.build_flags` của case.
+4. Chạy `.phpt` khai báo trong `files.test` để lấy defect oracle.
+5. Chọn deterministic tối đa 70 `.phpt` khác và chạy cùng tập trên buggy/fixed.
+6. Chỉ giữ target đạt `FAIL(buggy) -> PASS(fixed)`. Test bổ sung không pass
+   trên cả hai baseline được ghi thành `--exclude-test`, không làm hỏng prepare.
+7. Publish source buggy sạch, config schema v6 và failure log tại:
+
+```text
+out_tmp_dirs/debugging_framework/php/inputs/
+├── CVE-2016-3132__28a6ed9f9a36/
+├── CVE-2016-3132__28a6ed9f9a36.debugging-framework.json
+└── CVE-2016-3132__28a6ed9f9a36.failure.log
+```
+
+Chạy doctor hoặc toàn bộ `prepare -> doctor -> repair`:
+
+```bash
+python3 defectsc_tpl/projects/php___php-src/run_debugging_case.py \
+  doctor --sha 28a6ed9f9a36
+
+python3 defectsc_tpl/projects/php___php-src/run_debugging_case.py \
+  trial --sha 28a6ed9f9a36 --command-timeout 7200
+```
+
+Input đã tạo trước đó được tái sử dụng. Dùng `--force` với `prepare` hoặc
+`trial` để xác minh và tạo lại từ đầu.

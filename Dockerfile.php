@@ -1,11 +1,11 @@
 # ----------------------------------------------------------------------
 # Dockerfile.php - slim image cho Defects4C project php___php-src
 #
-# Image này phục vụ build_meta_php.py:
+# Image này phục vụ build_meta_php.py và run_debugging_case.py:
 #   - autotools/build-essential để build php-src
 #   - re2c/bison/pkg-config và các dev libs phổ biến cho extension metadata
 #   - gcc/gcov để thu coverage
-#   - python3 để chạy script sinh metadata
+#   - python3 để chạy script sinh metadata và adapter Debugging Framework
 #
 # Build:
 #   docker build -f Dockerfile.php -t php-src/defect4c:latest .
@@ -60,6 +60,13 @@ RUN mkdir -p /tmp/bison-build && \
     make -j"$(nproc)" && \
     make install && \
     rm -rf /tmp/bison-build
+
+COPY defectsc_tpl/projects/php___php-src/run_php_build.py \
+     /usr/local/bin/defects4c-php-build
+COPY defectsc_tpl/projects/php___php-src/run_php_tests.py \
+     /usr/local/bin/defects4c-php-test
+RUN chmod 0755 /usr/local/bin/defects4c-php-build \
+               /usr/local/bin/defects4c-php-test
 
 # Mount points:
 #   /src     <- defectsc_tpl
