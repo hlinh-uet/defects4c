@@ -1,4 +1,91 @@
-# Chạy SPIRV-Tools metadata
+# SPIRV-Tools: Debugging Framework và metadata
+
+Thực hiện các lệnh từ thư mục
+`/Users/linhnh/Developer/Debugging/defects4c`.
+
+## Chuẩn bị input cho Debugging Framework
+
+Build image sau mỗi lần thay đổi `Dockerfile.spirv-tools` hoặc
+`run_spirv_tests.py`:
+
+```bash
+docker build -f Dockerfile.spirv-tools \
+  -t spirv-tools/defect4c:latest .
+```
+
+Liệt kê 11 record trong dataset:
+
+```bash
+python3 \
+  defectsc_tpl/projects_v1/KhronosGroup___SPIRV-Tools/run_debugging_case.py \
+  --list
+```
+
+Prepare một case:
+
+```bash
+python3 \
+  defectsc_tpl/projects_v1/KhronosGroup___SPIRV-Tools/run_debugging_case.py \
+  prepare \
+  --sha 6a9be627c760cf1efa43d155d4e6ee5e801deba3
+```
+
+Prepare toàn bộ 11 case và tiếp tục nếu một case không thỏa oracle:
+
+```bash
+python3 \
+  defectsc_tpl/projects_v1/KhronosGroup___SPIRV-Tools/run_debugging_case.py \
+  prepare \
+  --all \
+  --continue-on-error
+```
+
+Thêm `--force` khi image digest hoặc contract đã thay đổi. Input được ghi tại:
+
+```text
+out_tmp_dirs/debugging_framework/spirv-tools/inputs/
+├── <case-id>/
+├── <case-id>.debugging-framework.json
+└── <case-id>.failure.log
+```
+
+Contract prepare áp dụng cùng policy với LLVM/PHP:
+
+- fixed tree là toàn bộ `commit_after`; buggy tree chỉ overlay `files.src` từ
+  `commit_before`;
+- dependency trong `external/` được lấy bằng `utils/git-sync-deps` theo revision,
+  xóa Git metadata rồi đóng gói vào input; validation/repair chạy offline;
+- CTest target khai báo được chạy thật trên buggy và failure được tách xuống
+  GoogleTest case dạng `spirv-tools-test_opt::Optimizer.RemoveNop`;
+- chỉ case có outcome `FAIL(buggy) -> PASS(fixed)` được ghi vào
+  `repair.failing_tests`;
+- chọn tối đa 70 GoogleTest case bổ sung, ưu tiên cùng suite với failure rồi
+  sắp ổn định theo case id/commit;
+- case bổ sung không `passed` trên cả buggy và fixed được ghi thành
+  `--exclude-test` trong regression command;
+- config ghim OCI image digest, khai báo `schema_version=6` và disposable
+  workspace để Framework tạo Git baseline tạm.
+
+Xem lệnh Framework của một input đã prepare:
+
+```bash
+python3 \
+  defectsc_tpl/projects_v1/KhronosGroup___SPIRV-Tools/run_debugging_case.py \
+  show \
+  --sha 6a9be627c760cf1efa43d155d4e6ee5e801deba3
+```
+
+Chạy `doctor` hoặc `repair`:
+
+```bash
+python3 defectsc_tpl/projects_v1/KhronosGroup___SPIRV-Tools/run_debugging_case.py \
+  doctor --sha 6a9be627c760cf1efa43d155d4e6ee5e801deba3
+
+python3 defectsc_tpl/projects_v1/KhronosGroup___SPIRV-Tools/run_debugging_case.py \
+  repair --sha 6a9be627c760cf1efa43d155d4e6ee5e801deba3
+```
+
+## Pipeline metadata Unified-Debugging
 
 Thực hiện các lệnh dưới đây từ thư mục `defects4c/`.
 
