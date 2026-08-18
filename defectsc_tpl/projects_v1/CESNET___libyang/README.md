@@ -60,23 +60,26 @@ out_tmp_dirs/debugging_framework/libyang/inputs/
 ```
 
 Không tạo `results/`, `outputs/`, manifest hay audit logs trong Defects4C.
-Muốn tạo lại input, thêm `--force`.
+Muốn tạo lại input, thêm `--force`. Nếu image tag đã được build lại thành digest
+mới, adapter cũng yêu cầu `--force` để không tái sử dụng config ghim image cũ.
 
 Config sinh ra dùng `schema_version=6` và lưu đầy đủ contract mà Framework cần:
 
 - `setup`: configure CMake với test enabled;
 - `build`: build bằng Ninja;
 - `target_test`: CTest `-R ^{test_id}$`, chỉ là bước fail-fast tùy chọn;
-- `regression_test`: chạy toàn bộ CTest suite ngoại trừ các test vẫn fail trên
-  fixed commit;
+- `regression_test`: chạy toàn bộ CTest suite ngoại trừ các test không có outcome
+  `passed` trên fixed commit (bao gồm `failed`, `error` và `skipped`);
 - `repair.failing_tests` và image/runtime đã chuẩn bị.
+- `workspace`: cho phép Framework tạo Git baseline tạm vì input đã bỏ `.git`.
 
 Trong lúc `prepare`, adapter luôn chạy cả buggy tree và fixed tree. Chỉ target có
-outcome `FAIL(buggy) -> PASS(fixed)` được ghi vào `repair.failing_tests`. Test
-fail ở cả buggy và fixed bị loại khỏi target lẫn regression contract; các test
-còn lại tạo thành fixed-compatible regression suite. Patch chỉ đạt
-`status=plausible` khi toàn bộ suite hợp lệ này pass. Các input cũ cần chạy lại
-`prepare --force` để nhận contract đã lọc.
+outcome trực tiếp `FAIL(buggy) -> PASS(fixed)` được ghi vào
+`repair.failing_tests`; kết quả target trên fixed không được suy ra từ một lần
+chạy full suite khác. Mọi test không pass trên fixed bị loại khỏi regression
+contract. Patch chỉ đạt `status=plausible` khi target và toàn bộ suite hợp lệ này
+pass. Các input cũ cần chạy lại `prepare --force` để nhận contract đã lọc và
+workspace contract mới.
 
 ## Bước 2: xem đúng public CLI
 
@@ -148,5 +151,5 @@ Adapter checkout toàn bộ repository tại `commit_after`, sau đó ghi đè c
 trong `files.src` bằng nội dung tại `commit_before`. Với case trên, file được
 hoàn nguyên là `src/tree_schema_compile.c`; target
 `src_tree_schema_compile` được chạy thật và output fail được lưu vào file
-`.failure.log`. Adapter cũng build fixed commit, loại mọi target không pass trên
-fixed và loại các fixed-failing test khỏi `regression_test`.
+`.failure.log`. Adapter cũng build fixed commit, loại mọi target không pass trực
+tiếp trên fixed và loại mọi fixed-nonpassing test khỏi `regression_test`.

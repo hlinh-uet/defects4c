@@ -101,6 +101,12 @@ def prepare_case(
     final_project, final_config, final_failure = input_paths(inputs_root, case_id)
     if input_ready(final_project, final_config, final_failure):
         if not force:
+            prepared_image = config_environment_image(final_config)
+            if prepared_image != image:
+                raise RuntimeError(
+                    f"Input {case_id} dùng image {prepared_image}, nhưng image hiện tại "
+                    f"là {image}; dùng --force để xác minh và tạo lại contract"
+                )
             return final_project, final_config, final_failure
     elif any(path.exists() for path in (final_project, final_config, final_failure)) and not force:
         raise RuntimeError(
@@ -208,7 +214,7 @@ def prepare_case(
                 f"{case_id}: none of the available CTest targets failed: "
                 + ", ".join(active_targets)
             )
-        buggy_outcomes = observe_ctest_suite(
+        _buggy_outcomes = observe_ctest_suite(
             runtime=runtime,
             image=image,
             project_root=project_root,
@@ -217,7 +223,7 @@ def prepare_case(
             timeout=command_timeout,
         )
 
-        fixed_outcomes = verify_fixed_oracle(
+        fixed_target_outcomes, fixed_suite_outcomes = verify_fixed_oracle(
             source_repo=source_repo,
             staging=staging,
             bug=bug,
@@ -228,7 +234,7 @@ def prepare_case(
             timeout=command_timeout,
             log_path=work_dir / "fixed-verification.log",
         )
-        eligible_targets = select_repair_targets(failed_targets, fixed_outcomes)
+        eligible_targets = select_repair_targets(failed_targets, fixed_target_outcomes)
         excluded_targets = [
             target for target in failed_targets if target not in eligible_targets
         ]
@@ -247,15 +253,14 @@ def prepare_case(
         ).rstrip() + "\n"
         failure_path.write_text(failure_output, encoding="utf-8")
 
-        fixed_failing_tests = failing_outcome_ids(fixed_outcomes)
-        fail_both = sorted(
-            target for target in fixed_failing_tests
-            if buggy_outcomes.get(target) == "failed"
-        )
-        if fail_both:
+        nonpassing_fixed_tests = nonpassing_outcome_ids(fixed_suite_outcomes)
+        if nonpassing_fixed_tests:
             print(
-                f"[filter] {case_id}: loại khỏi regression vì fail trên buggy và fixed: "
-                + ", ".join(fail_both),
+                f"[filter] {case_id}: loại khỏi regression vì không pass trên fixed: "
+                + ", ".join(
+                    f"{target} ({fixed_suite_outcomes[target]})"
+                    for target in nonpassing_fixed_tests
+                ),
                 flush=True,
             )
         write_framework_config(
@@ -264,7 +269,7 @@ def prepare_case(
             image=image,
             runtime=runtime,
             jobs=jobs,
-            excluded_regression_tests=fixed_failing_tests,
+            excluded_regression_tests=nonpassing_fixed_tests,
         )
 
         framework_work_dir = project_root / ".debugging-framework"
@@ -299,6 +304,7 @@ def input_ready(project_root: Path, config_path: Path, failure_path: Path) -> bo
         project_root.is_dir()
         and config_path.is_file()
         and framework_config_ready(config_path)
+        and not (project_root / ".git").exists()
         and not (project_root / ".debugging-framework.json").exists()
         and failure_path.is_file()
         and failure_path.stat().st_size > 0
@@ -312,20 +318,90 @@ def framework_config_ready(config_path: Path) -> bool:
         return False
     if not isinstance(value, dict) or value.get("schema_version") != 6:
         return False
+    setup = value.get("setup")
+    build = value.get("build")
+    target = value.get("target_test")
     regression = value.get("regression_test")
-    if not isinstance(regression, list) or not regression:
+    repair = value.get("repair")
+    environment = value.get("environment")
+    workspace = value.get("workspace")
+    failing_tests = repair.get("failing_tests") if isinstance(repair, dict) else None
+    if not (
+        value.get("system") == "cmake"
+        and isinstance(setup, list) and len(setup) == 1
+        and isinstance(build, list) and len(build) == 1
+        and isinstance(target, list) and len(target) == 1
+        and isinstance(regression, list) and len(regression) == 1
+        and isinstance(failing_tests, list) and bool(failing_tests)
+        and all(isinstance(item, str) and item.strip() for item in failing_tests)
+        and len(failing_tests) == len(set(failing_tests))
+        and isinstance(environment, dict)
+        and environment.get("mode") == "image"
+        and isinstance(environment.get("runtime"), str)
+        and bool(environment.get("runtime"))
+        and isinstance(environment.get("image"), str)
+        and bool(environment.get("image"))
+        and isinstance(workspace, dict)
+        and workspace.get("disposable") is True
+        and workspace.get("initialize_git_if_missing") is True
+    ):
         return False
-    for entry in regression:
-        command = entry.get("command") if isinstance(entry, dict) else entry
-        if isinstance(command, str):
-            arguments = shlex.split(command)
-        elif isinstance(command, list):
-            arguments = [str(argument) for argument in command]
-        else:
-            return False
-        if "-R" in arguments or any("{test_id}" in argument for argument in arguments):
-            return False
-    return True
+    setup_args = command_arguments(setup[0])
+    build_args = command_arguments(build[0])
+    target_args = command_arguments(target[0])
+    regression_args = command_arguments(regression[0])
+    if None in (setup_args, build_args, target_args, regression_args):
+        return False
+    assert setup_args is not None
+    assert build_args is not None
+    assert target_args is not None
+    assert regression_args is not None
+    target_pattern = option_value(target_args, "-R")
+    exclusion_pattern = option_value(regression_args, "-E")
+    return bool(
+        setup_args and setup_args[0] == "cmake"
+        and "-S" in setup_args and "-B" in setup_args
+        and build_args[:2] == ["cmake", "--build"]
+        and target_args[:3] == ["ctest", "--test-dir", ".debugging-framework/build"]
+        and target_pattern == "^{test_id}$"
+        and "--output-junit" in target_args
+        and regression_args[:3]
+        == ["ctest", "--test-dir", ".debugging-framework/build"]
+        and "-R" not in regression_args
+        and not any("{test_id}" in argument for argument in regression_args)
+        and "--output-junit" in regression_args
+        and ("-E" not in regression_args or bool(exclusion_pattern))
+    )
+
+
+def command_arguments(entry: object) -> list[str] | None:
+    command = entry.get("command") if isinstance(entry, dict) else entry
+    if isinstance(command, str):
+        try:
+            return shlex.split(command)
+        except ValueError:
+            return None
+    if isinstance(command, list) and all(isinstance(argument, str) for argument in command):
+        return list(command)
+    return None
+
+
+def option_value(arguments: list[str], option: str) -> str | None:
+    positions = [index for index, argument in enumerate(arguments) if argument == option]
+    if len(positions) != 1 or positions[0] + 1 >= len(arguments):
+        return None
+    return arguments[positions[0] + 1]
+
+
+def config_environment_image(config_path: Path) -> str:
+    value = read_json(config_path)
+    if not isinstance(value, dict):
+        return ""
+    environment = value.get("environment")
+    if not isinstance(environment, dict):
+        return ""
+    image = environment.get("image")
+    return image if isinstance(image, str) else ""
 
 
 def remove_project_input(project_root: Path, inputs_root: Path, case_id: str) -> None:
@@ -416,6 +492,10 @@ def write_framework_config(
         ],
         "repair": {
             "failing_tests": list(failing_tests),
+        },
+        "workspace": {
+            "disposable": True,
+            "initialize_git_if_missing": True,
         },
         "environment": {"mode": "image", "runtime": runtime, "image": image},
     }
@@ -517,6 +597,10 @@ def observe_ctest_suite(
         raise RuntimeError(f"Full CTest suite was not observed; see {log_path}")
     if not report_path.is_file():
         raise RuntimeError(f"CTest JUnit report is missing: {report_path}")
+    return read_ctest_outcomes(report_path)
+
+
+def read_ctest_outcomes(report_path: Path) -> dict[str, str]:
     try:
         root = ET.parse(report_path).getroot()
     except (ET.ParseError, OSError) as exc:
@@ -561,7 +645,7 @@ def verify_fixed_oracle(
     targets: list[str],
     timeout: int,
     log_path: Path,
-) -> dict[str, str]:
+) -> tuple[dict[str, str], dict[str, str]]:
     fixed_root = staging / ".fixed-verification-project"
     commit_after = required_sha(bug, "commit_after")
     materializer.materialize_worktree(
@@ -573,28 +657,47 @@ def verify_fixed_oracle(
         force=False,
     )
     remove_git_history(fixed_root)
-    commands = validation_build_commands(jobs)
-    run_commands_logged(
-        runtime=runtime,
-        image=image,
-        project_root=fixed_root,
-        commands=commands,
-        log_path=log_path,
-        timeout=timeout,
-        require_success=True,
-    )
+    target_outcomes: dict[str, str] = {}
     try:
+        run_commands_logged(
+            runtime=runtime,
+            image=image,
+            project_root=fixed_root,
+            commands=validation_build_commands(jobs),
+            log_path=log_path,
+            timeout=timeout,
+            require_success=True,
+        )
         with log_path.open("a", encoding="utf-8") as log:
-            for target in targets:
+            for index, target in enumerate(targets):
+                report_name = f"fixed-target-{index}.xml"
+                report_path = fixed_root / ".debugging-framework" / report_name
                 command = [
                     "ctest", "--test-dir", ".debugging-framework/build",
-                    "-R", f"^{re.escape(target)}$", "-V", "--output-on-failure",
+                    "-R", f"^{re.escape(target)}$", "-V",
+                    "--output-junit", f"../{report_name}", "--output-on-failure",
                 ]
                 result = run_in_image(runtime, image, fixed_root, command, timeout=timeout)
                 log.write(command_section(command, result.returncode, result.stdout))
                 if not test_execution_observed(result.stdout, target):
                     raise RuntimeError(f"Fixed CTest target was not observed: {target}")
-        return observe_ctest_suite(
+                if not report_path.is_file():
+                    raise RuntimeError(
+                        f"Fixed CTest target JUnit report is missing: {report_path}"
+                    )
+                reported_outcome = read_ctest_outcomes(report_path).get(target)
+                if reported_outcome is None:
+                    raise RuntimeError(
+                        f"Fixed CTest target outcome is missing from JUnit: {target}"
+                    )
+                target_outcomes[target] = (
+                    "passed"
+                    if result.returncode == 0 and reported_outcome == "passed"
+                    else reported_outcome
+                    if reported_outcome != "passed"
+                    else "failed"
+                )
+        suite_outcomes = observe_ctest_suite(
             runtime=runtime,
             image=image,
             project_root=fixed_root,
@@ -602,6 +705,7 @@ def verify_fixed_oracle(
             log_path=log_path.with_name("fixed-suite.log"),
             timeout=timeout,
         )
+        return target_outcomes, suite_outcomes
     finally:
         shutil.rmtree(fixed_root, ignore_errors=True)
 
@@ -709,10 +813,10 @@ def select_repair_targets(
     ]
 
 
-def failing_outcome_ids(outcomes: dict[str, str]) -> list[str]:
-    """Return tests that cannot be required by the fixed-compatible regression suite."""
+def nonpassing_outcome_ids(outcomes: dict[str, str]) -> list[str]:
+    """Return tests that cannot be required by a fixed-compatible regression suite."""
     return sorted(
-        target for target, outcome in outcomes.items() if outcome == "failed"
+        target for target, outcome in outcomes.items() if outcome != "passed"
     )
 
 
@@ -865,7 +969,7 @@ def main(argv: list[str] | None = None) -> int:
                     force=args.force,
                 )
             require_inputs(project_root, config_path, failure_path)
-            print_contract(project_root, config_path, failure_path, bug)
+            print_contract(project_root, config_path, failure_path)
 
             if args.action == "prepare":
                 continue
@@ -992,13 +1096,14 @@ def print_contract(
     project_root: Path,
     config_path: Path,
     failure_path: Path,
-    bug: dict,
 ) -> None:
+    config = read_json(config_path)
+    failing_tests = ((config.get("repair") or {}).get("failing_tests") or [])
     print("[inputs ready]")
     print(f"  project:      {project_root}")
     print(f"  config:       {config_path}")
     print(f"  failure log:  {failure_path}")
-    print(f"  failing test: {', '.join(candidate_targets(bug))}")
+    print(f"  failing test: {', '.join(failing_tests)}")
 
 
 def print_commands(
