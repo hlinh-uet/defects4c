@@ -308,5 +308,11 @@ python3 defectsc_tpl/projects/php___php-src/run_debugging_case.py \
   trial --sha 28a6ed9f9a36 --command-timeout 7200
 ```
 
+Input PHP là source export không có `.git`, nên adapter cho phép Framework tạo
+baseline Git tạm ngay trong chính input thay vì copy source sang workspace khác.
+`.git` tạm được xóa sau khi project đã được reset. Adapter cũng cho phép sửa
+production source `.re`; config cũ được tự nâng cấp khi gọi runner mà không cần
+build lại case.
+
 Input đã tạo trước đó được tái sử dụng. Dùng `--force` với `prepare` hoặc
 `trial` để xác minh và tạo lại từ đầu.

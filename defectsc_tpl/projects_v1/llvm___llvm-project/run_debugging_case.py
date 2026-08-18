@@ -459,6 +459,10 @@ def write_framework_config(
             }
         ],
         "repair": {"failing_tests": list(failing_tests)},
+        "workspace": {
+            "disposable": True,
+            "initialize_git_if_missing": True,
+        },
         "environment": {"mode": "image", "runtime": runtime, "image": image},
     }
     path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
@@ -785,6 +789,7 @@ def input_ready(project_root: Path, config_path: Path, failure_path: Path) -> bo
         project_root.is_dir()
         and config_path.is_file()
         and framework_config_ready(config_path)
+        and not (project_root / ".git").exists()
         and not (project_root / ".debugging-framework.json").exists()
         and failure_path.is_file()
         and failure_path.stat().st_size > 0
@@ -801,6 +806,7 @@ def framework_config_ready(config_path: Path) -> bool:
     regression = value.get("regression_test")
     repair = value.get("repair")
     environment = value.get("environment")
+    workspace = value.get("workspace")
     if not (
         isinstance(regression, list)
         and len(regression) == 1
@@ -809,6 +815,9 @@ def framework_config_ready(config_path: Path) -> bool:
         and isinstance(environment, dict)
         and environment.get("mode") == "image"
         and environment.get("image")
+        and isinstance(workspace, dict)
+        and workspace.get("disposable") is True
+        and workspace.get("initialize_git_if_missing") is True
     ):
         return False
     entry = regression[0]
@@ -847,6 +856,22 @@ def remove_project_input(project_root: Path, inputs_root: Path, case_id: str) ->
     if resolved_project.parent != resolved_root or resolved_project.name != case_id:
         raise RuntimeError(f"Từ chối xóa input path không an toàn: {resolved_project}")
     shutil.rmtree(resolved_project)
+
+
+def upgrade_workspace_contract(config_path: Path) -> None:
+    """Upgrade already-prepared inputs without rebuilding the benchmark case."""
+    if not config_path.is_file():
+        return
+    value = read_json(config_path)
+    if not isinstance(value, dict):
+        return
+    workspace = {
+        "disposable": True,
+        "initialize_git_if_missing": True,
+    }
+    if value.get("workspace") != workspace:
+        value["workspace"] = workspace
+        config_path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
 def remove_file_input(path: Path, inputs_root: Path, expected_name: str) -> None:
@@ -990,6 +1015,7 @@ def main(argv: list[str] | None = None) -> int:
         project_root, config_path, failure_path = input_paths(inputs_root, case_id)
         print(f"[{index}/{len(selected)}] case {case_id}", flush=True)
         try:
+            upgrade_workspace_contract(config_path)
             if args.action in {"prepare", "trial"}:
                 project_root, config_path, failure_path = prepare_case(
                     bug=bug,
@@ -1003,6 +1029,7 @@ def main(argv: list[str] | None = None) -> int:
                     build_type=args.build_type,
                     force=args.force,
                 )
+            upgrade_workspace_contract(config_path)
             require_inputs(project_root, config_path, failure_path)
             print_contract(project_root, config_path, failure_path)
 

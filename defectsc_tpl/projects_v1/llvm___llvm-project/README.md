@@ -105,6 +105,13 @@ báo; `regression_test` chạy tối đa 70 test bổ sung đã chọn cố đ�
 test không pass trên cả buggy lẫn fixed. Image ID đã inspect được ghi vào config
 để Framework không âm thầm pull hoặc đổi environment.
 
+Input LLVM là source export không có `.git`, nên adapter đánh dấu nó
+`workspace.disposable=true` và cho phép Framework tạo một baseline Git tạm ngay
+trong chính thư mục input. Framework không copy thêm full source tree; nó reset
+baseline giữa các attempt và xóa `.git` tạm khi kết thúc. Config của input đã
+prepare bằng phiên bản adapter cũ được tự bổ sung contract này khi gọi
+`prepare`, `doctor`, `show`, `trial` hoặc `repair`, không cần build lại case.
+
 ## Giới hạn hiện tại
 
 - Dataset trải dài 2014–2023. Một số revision cũ có thể cần bổ sung dependency

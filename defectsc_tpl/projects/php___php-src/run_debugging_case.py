@@ -459,7 +459,14 @@ def write_framework_config(
                 "failure_pattern": TEST_FAILURE_PATTERN,
             }
         ],
-        "repair": {"failing_tests": list(failing_tests)},
+        "repair": {
+            "failing_tests": list(failing_tests),
+            "source_extensions": [".re"],
+        },
+        "workspace": {
+            "disposable": True,
+            "initialize_git_if_missing": True,
+        },
         "environment": {"mode": "image", "runtime": runtime, "image": image},
     }
     path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
@@ -751,6 +758,7 @@ def framework_config_ready(config_path: Path) -> bool:
     regression = value.get("regression_test")
     repair = value.get("repair")
     environment = value.get("environment")
+    workspace = value.get("workspace")
     if not (
         isinstance(regression, list)
         and len(regression) == 1
@@ -759,6 +767,10 @@ def framework_config_ready(config_path: Path) -> bool:
         and isinstance(environment, dict)
         and environment.get("mode") == "image"
         and environment.get("image")
+        and isinstance(workspace, dict)
+        and workspace.get("disposable") is True
+        and workspace.get("initialize_git_if_missing") is True
+        and ".re" in repair.get("source_extensions", [])
     ):
         return False
     entry = regression[0]
@@ -819,6 +831,35 @@ def bug_id_for(bug: dict) -> str:
 
 def required_sha(bug: dict, key: str) -> str:
     return materializer.required_sha(bug, key)
+
+
+def upgrade_workspace_contract(config_path: Path) -> None:
+    """Upgrade already-prepared inputs without rebuilding the benchmark case."""
+    if not config_path.is_file():
+        return
+    value = read_json(config_path)
+    if not isinstance(value, dict):
+        return
+    repair = value.get("repair")
+    if not isinstance(repair, dict):
+        return
+    extensions = repair.get("source_extensions")
+    if not isinstance(extensions, list):
+        extensions = []
+        repair["source_extensions"] = extensions
+    changed = False
+    if ".re" not in extensions:
+        extensions.append(".re")
+        changed = True
+    workspace = {
+        "disposable": True,
+        "initialize_git_if_missing": True,
+    }
+    if value.get("workspace") != workspace:
+        value["workspace"] = workspace
+        changed = True
+    if changed:
+        config_path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
 def resolve_runtime(value: str) -> str:
@@ -918,6 +959,7 @@ def main(argv: list[str] | None = None) -> int:
         project_root, config_path, failure_path = input_paths(inputs_root, case_id)
         print(f"[{index}/{len(selected)}] case {case_id}", flush=True)
         try:
+            upgrade_workspace_contract(config_path)
             if args.action in {"prepare", "trial"}:
                 project_root, config_path, failure_path = prepare_case(
                     bug=bug,
@@ -930,6 +972,7 @@ def main(argv: list[str] | None = None) -> int:
                     command_timeout=prepare_timeout,
                     force=args.force,
                 )
+            upgrade_workspace_contract(config_path)
             require_inputs(project_root, config_path, failure_path)
             print_contract(project_root, config_path, failure_path)
             if args.action == "prepare":
