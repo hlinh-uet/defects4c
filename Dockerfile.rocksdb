@@ -43,6 +43,10 @@ RUN apt-get update -yq && \
 
 RUN pip3 install --no-cache-dir jinja2 jmespath
 
+COPY defectsc_tpl/projects_v1/facebook___rocksdb/run_rocksdb_tests.py \
+  /usr/local/bin/defects4c-rocksdb-test
+RUN chmod 0755 /usr/local/bin/defects4c-rocksdb-test
+
 WORKDIR /src
 
 CMD ["bash"]

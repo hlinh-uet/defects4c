@@ -3,6 +3,83 @@
 This project uses a dedicated RocksDB image and a project-specific metadata
 builder.
 
+## Chuẩn bị input cho Debugging Framework
+
+Thực hiện từ thư mục `/Users/linhnh/Developer/Debugging/defects4c`.
+
+Build image sau mỗi lần thay đổi `Dockerfile.rocksdb` hoặc test adapter:
+
+```bash
+docker build -f Dockerfile.rocksdb -t rocksdb/defect4c:latest .
+```
+
+Liệt kê 3 defect:
+
+```bash
+python3 defectsc_tpl/projects_v1/facebook___rocksdb/run_debugging_case.py \
+  --list
+```
+
+Prepare một defect:
+
+```bash
+python3 defectsc_tpl/projects_v1/facebook___rocksdb/run_debugging_case.py \
+  prepare \
+  --sha cc8ded6152c51ac853d2915273eed3e6f9af029b \
+  --jobs 2 \
+  --command-timeout 7200
+```
+
+Prepare cả 3 defect, tiếp tục nếu một defect build lỗi hoặc không thỏa oracle:
+
+```bash
+python3 defectsc_tpl/projects_v1/facebook___rocksdb/run_debugging_case.py \
+  prepare \
+  --all \
+  --jobs 2 \
+  --command-timeout 7200 \
+  --continue-on-error
+```
+
+Input được tạo tại:
+
+```text
+out_tmp_dirs/debugging_framework/rocksdb/inputs/
+├── <case-id>/
+├── <case-id>.debugging-framework.json
+└── <case-id>.failure.log
+```
+
+Contract giống LLVM/PHP:
+
+- fixed tree là toàn bộ `commit_after`; buggy tree là fixed tree được overlay
+  `files.src` từ `commit_before`;
+- chỉ build GoogleTest binary tương ứng với `files.test`, không build/chạy toàn
+  bộ RocksDB test suite;
+- test khai báo trong `c_compile.test_flags` phải có kết quả
+  `FAIL(buggy) -> PASS(fixed)` mới được ghi vào `repair.failing_tests`;
+- discover các case trong cùng binary rồi chọn tối đa 70 test bổ sung, ưu tiên
+  cùng GoogleTest suite với target;
+- cùng tập test bổ sung được chạy trên buggy và fixed; case không `passed` trên
+  một trong hai phiên bản được truyền thành `--exclude-test` trong config;
+- config dùng `schema_version=6`, ghim OCI image digest, test adapter có bằng
+  chứng thực thi và workspace disposable; validation/repair chạy offline.
+
+Kiểm tra hoặc chạy repair một defect đã prepare:
+
+```bash
+python3 defectsc_tpl/projects_v1/facebook___rocksdb/run_debugging_case.py \
+  doctor --sha cc8ded6152c51ac853d2915273eed3e6f9af029b --jobs 2
+
+python3 defectsc_tpl/projects_v1/facebook___rocksdb/run_debugging_case.py \
+  repair --sha cc8ded6152c51ac853d2915273eed3e6f9af029b \
+  --jobs 2 --attempts 3 --command-timeout 7200
+```
+
+`show --sha <commit_after>` in ra chính xác ba path và lệnh public
+Debugging-Framework mà runner sẽ sử dụng. Thêm `--force` cho `prepare` khi
+image digest hoặc contract đã thay đổi.
+
 ## Pipeline
 
 `build_meta_rocksdb.py` follows the Defects4C convention:
