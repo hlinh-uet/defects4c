@@ -45,6 +45,13 @@ RUN apt-get update -yq && \
 # Python deps tối thiểu cho bug_helper_v1_out2.py và build_meta_tcpdump.py
 RUN pip3 install --no-cache-dir jinja2 jmespath
 
+COPY defectsc_tpl/projects/the-tcpdump-group___tcpdump/run_tcpdump_build.py \
+     /usr/local/bin/defects4c-tcpdump-build
+COPY defectsc_tpl/projects/the-tcpdump-group___tcpdump/run_tcpdump_tests.py \
+     /usr/local/bin/defects4c-tcpdump-test
+RUN chmod 0755 /usr/local/bin/defects4c-tcpdump-build \
+               /usr/local/bin/defects4c-tcpdump-test
+
 # Mount points khớp với README của project tcpdump:
 #   /src     ← defectsc_tpl (script, projects/*, templates)
 #   /out     ← out_tmp_dirs (clone + logs)

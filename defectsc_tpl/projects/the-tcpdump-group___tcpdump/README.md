@@ -1,5 +1,107 @@
 # `the-tcpdump-group___tcpdump` — Defects4C × Unified-Debugging
 
+## Prepare cho Debugging Framework
+
+Chạy các lệnh trong phần này từ thư mục:
+
+```bash
+cd /Users/linhnh/Developer/Debugging/defects4c
+```
+
+Build lại image sau khi thay đổi `Dockerfile.tcpdump`,
+`run_tcpdump_build.py` hoặc `run_tcpdump_tests.py`:
+
+```bash
+docker build -f Dockerfile.tcpdump -t tcpdump/defect4c:latest .
+```
+
+Liệt kê 47 record và commit dùng để chọn case:
+
+```bash
+python3 \
+  defectsc_tpl/projects/the-tcpdump-group___tcpdump/run_debugging_case.py \
+  --list
+```
+
+Prepare thử một case:
+
+```bash
+python3 \
+  defectsc_tpl/projects/the-tcpdump-group___tcpdump/run_debugging_case.py \
+  prepare \
+  --sha f76e7feb41a4327d2b0978449bbdafe98d4a3771 \
+  --jobs 2 \
+  --command-timeout 7200
+```
+
+Prepare toàn bộ dataset; case không build được hoặc không còn thỏa oracle sẽ
+được báo lỗi nhưng không làm dừng các case sau:
+
+```bash
+python3 \
+  defectsc_tpl/projects/the-tcpdump-group___tcpdump/run_debugging_case.py \
+  prepare \
+  --all \
+  --jobs 2 \
+  --command-timeout 7200 \
+  --continue-on-error
+```
+
+Thêm `--force` để prepare lại khi image hoặc contract thay đổi. Output nằm tại:
+
+```text
+out_tmp_dirs/debugging_framework/tcpdump/inputs/
+├── <case-id>/
+├── <case-id>.debugging-framework.json
+└── <case-id>.failure.log
+```
+
+Xem chính xác lệnh Framework của một case đã prepare:
+
+```bash
+python3 \
+  defectsc_tpl/projects/the-tcpdump-group___tcpdump/run_debugging_case.py \
+  show \
+  --sha f76e7feb41a4327d2b0978449bbdafe98d4a3771 \
+  --jobs 2
+```
+
+Chạy `doctor` rồi `repair`:
+
+```bash
+python3 \
+  defectsc_tpl/projects/the-tcpdump-group___tcpdump/run_debugging_case.py \
+  doctor \
+  --sha f76e7feb41a4327d2b0978449bbdafe98d4a3771 \
+  --jobs 2 \
+  --command-timeout 7200
+
+python3 \
+  defectsc_tpl/projects/the-tcpdump-group___tcpdump/run_debugging_case.py \
+  repair \
+  --sha f76e7feb41a4327d2b0978449bbdafe98d4a3771 \
+  --jobs 2 \
+  --command-timeout 7200
+```
+
+Contract giống LLVM, PHP và SPIRV-Tools:
+
+- fixed là toàn bộ cây `commit_after`; buggy là fixed tree và chỉ overlay các
+  file `files.src` từ `commit_before`;
+- target được ánh xạ từ `files.test` sang entry thật trong `tests/TESTLIST`;
+- build buggy/fixed bằng ASan và chỉ giữ target có kết quả
+  `FAIL(buggy) -> PASS(fixed)`;
+- ngoài target, chọn ổn định tối đa 70 test khác và chạy đúng cùng tập đó trên
+  buggy lẫn fixed;
+- test bổ sung không pass trên cả hai phía vẫn nằm trong tập đã chọn nhưng được
+  ghi bằng `--exclude-test` trong regression command;
+- config dùng `schema_version=6`, ghim OCI image digest, chạy offline và khai
+  báo disposable workspace;
+- cây input cuối cùng được materialize lại sạch, không chứa `.git` hoặc build
+  artifact của bước prepare.
+
+Phần còn lại của tài liệu mô tả pipeline metadata Unified-Debugging cũ.
+
 ## 1. Kiến trúc & ngữ cảnh
 
 ```

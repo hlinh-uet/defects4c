@@ -1,0 +1,31 @@
+# Slim benchmark image for defectsc_tpl/projects/curl___curl.
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=UTC \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update -yq && \
+    apt-get install -yq --no-install-recommends \
+      build-essential make gcc g++ \
+      autoconf automake libtool pkg-config \
+      perl python3 \
+      git ca-certificates \
+      jq \
+      findutils coreutils grep sed diffutils gawk \
+      procps util-linux bash \
+      tzdata && \
+    apt-get autoremove -y && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+COPY defectsc_tpl/projects/curl___curl/run_curl_build.py \
+     /usr/local/bin/defects4c-curl-build
+COPY defectsc_tpl/projects/curl___curl/run_curl_tests.py \
+     /usr/local/bin/defects4c-curl-test
+RUN chmod 0755 /usr/local/bin/defects4c-curl-build \
+               /usr/local/bin/defects4c-curl-test
+
+WORKDIR /src
+CMD ["bash"]
