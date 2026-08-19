@@ -10,7 +10,9 @@ cd /Users/linhnh/Developer/Debugging/defects4c
 
 Dataset hiện có một record: `CVE-2018-16790`. Target native được ánh xạ từ
 `src/libbson/tests/binary/test59.bson` sang test ID `/bson/validate` của
-`test-libbson`.
+executable kết hợp `src/libmongoc/test-libmongoc`. Revision 2018 này biên dịch
+các test libbson vào `test-libmongoc`, không tạo executable `test-libbson`
+riêng.
 
 Pipeline tuân theo cùng contract với LLVM, PHP, SPIRV-Tools, tcpdump và curl:
 

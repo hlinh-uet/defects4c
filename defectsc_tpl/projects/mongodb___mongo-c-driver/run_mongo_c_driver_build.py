@@ -83,7 +83,7 @@ def main(argv: list[str] | None = None) -> int:
         return returncode
     root = Path.cwd()
     required = (
-        root / BUILD_DIR / "src" / "libbson" / "test-libbson",
+        root / BUILD_DIR / "src" / "libmongoc" / "test-libmongoc",
         root / "src" / "libbson" / "tests" / "binary",
     )
     missing = [str(path) for path in required if not path.exists()]

@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 BUILD_DIR = Path(".debugging-framework/build")
-TEST_BINARY = BUILD_DIR / "src" / "libbson" / "test-libbson"
+TEST_BINARY = BUILD_DIR / "src" / "libmongoc" / "test-libmongoc"
 TEST_REGISTRATION_RE = re.compile(
     r'\bTestSuite_Add[A-Za-z0-9_]*\s*\(\s*'
     r'[A-Za-z_][A-Za-z0-9_]*\s*,\s*"(/[^"]+)"',
@@ -94,7 +94,9 @@ def classify_outcome(output: str, returncode: int) -> str | None:
 def run_one(root: Path, test_id: str, timeout: int) -> tuple[str, str]:
     binary = root / TEST_BINARY
     if not binary.is_file():
-        raise FileNotFoundError(f"libbson test executable is missing: {binary}")
+        raise FileNotFoundError(
+            f"combined mongo-c-driver test executable is missing: {binary}"
+        )
     returncode, output = run_command(
         [str(binary), "-l", test_id], cwd=root, timeout=timeout
     )

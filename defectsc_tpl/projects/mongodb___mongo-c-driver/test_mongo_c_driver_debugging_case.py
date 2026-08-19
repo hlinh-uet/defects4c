@@ -116,10 +116,16 @@ class AdapterTests(unittest.TestCase):
         self.assertIn("-DENABLE_TESTS=ON", build_adapter.CONFIGURE_FLAGS)
         self.assertIn("-DENABLE_MAINTAINER_FLAGS=OFF", build_adapter.CONFIGURE_FLAGS)
 
-    def test_build_action_checks_native_libbson_artifacts(self) -> None:
+    def test_build_action_checks_combined_native_test_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            binary = root / build_adapter.BUILD_DIR / "src" / "libbson" / "test-libbson"
+            binary = (
+                root
+                / build_adapter.BUILD_DIR
+                / "src"
+                / "libmongoc"
+                / "test-libmongoc"
+            )
             binary.parent.mkdir(parents=True)
             binary.touch()
             data = root / "src" / "libbson" / "tests" / "binary"
