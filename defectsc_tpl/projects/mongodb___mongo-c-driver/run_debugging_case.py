@@ -146,14 +146,16 @@ def prepare_case(
         declared_tests = target_tests_for_bug(project_root, bug)
         validate_test_ids(declared_tests, all_tests)
         if not declared_tests:
-            raise ValueError(f"{case_id}: no mongo_c_driver target test maps to files.test")
+            raise ValueError(f"{case_id}: no mongo-c-driver target test maps to files.test")
         regression_tests = select_regression_tests(
             all_tests,
             excluded_tests=declared_tests,
             seed=case_id,
         )
         if not regression_tests:
-            raise RuntimeError(f"{case_id}: no supplemental mongo_c_driver regression tests found")
+            raise RuntimeError(
+                f"{case_id}: no supplemental mongo-c-driver regression tests found"
+            )
 
         run_commands_logged(
             runtime=runtime,
@@ -173,7 +175,7 @@ def prepare_case(
         )
         if not failed_tests:
             raise RuntimeError(
-                f"{case_id}: none of the declared mongo_c_driver tests failed: "
+                f"{case_id}: none of the declared mongo-c-driver tests failed: "
                 + ", ".join(declared_tests)
             )
         buggy_regression_outcomes = observe_regression_tests(
@@ -206,13 +208,14 @@ def prepare_case(
         ]
         if excluded_targets:
             print(
-                f"[filter] {case_id}: loại mongo_c_driver target không pass trên fixed: "
+                f"[filter] {case_id}: loại target mongo-c-driver không pass trên fixed: "
                 + ", ".join(excluded_targets),
                 flush=True,
             )
         if not eligible_tests:
             raise RuntimeError(
-                f"{case_id}: no mongo_c_driver test has the required buggy-fail/fixed-pass outcome"
+                f"{case_id}: no mongo-c-driver test has the required "
+                "buggy-fail/fixed-pass outcome"
             )
 
         excluded_regression_tests = sorted(
@@ -223,13 +226,13 @@ def prepare_case(
         )
         if excluded_regression_tests:
             print(
-                f"[filter] {case_id}: loại mongo_c_driver regression không pass trên cả "
+                f"[filter] {case_id}: loại regression mongo-c-driver không pass trên cả "
                 "buggy và fixed: " + ", ".join(excluded_regression_tests),
                 flush=True,
             )
         if len(excluded_regression_tests) == len(regression_tests):
             raise RuntimeError(
-                f"{case_id}: no supplemental mongo_c_driver regression test passes on both "
+                f"{case_id}: no supplemental mongo-c-driver regression test passes on both "
                 "buggy and fixed"
             )
 
@@ -437,15 +440,20 @@ def write_framework_config(
     selected = list(dict.fromkeys(regression_tests))
     excluded = sorted(set(excluded_regression_tests))
     if not failing:
-        raise ValueError("mongo_c_driver config requires at least one failing test")
+        raise ValueError("mongo-c-driver config requires at least one failing test")
     if not 1 <= len(selected) <= REGRESSION_TEST_LIMIT:
         raise ValueError(
-            f"mongo_c_driver regression set must contain between 1 and {REGRESSION_TEST_LIMIT} tests"
+            "mongo-c-driver regression set must contain between 1 and "
+            f"{REGRESSION_TEST_LIMIT} tests"
         )
     if not set(excluded).issubset(selected):
-        raise ValueError("Excluded mongo_c_driver regression tests must be in the selected set")
+        raise ValueError(
+            "Excluded mongo-c-driver regression tests must be in the selected set"
+        )
     if len(excluded) == len(selected):
-        raise ValueError("At least one mongo_c_driver regression test must remain after exclusions")
+        raise ValueError(
+            "At least one mongo-c-driver regression test must remain after exclusions"
+        )
     build_commands = validation_build_commands(jobs)
     config = {
         "schema_version": 6,
@@ -568,11 +576,14 @@ def observe_target_tests(
             log.write(command_section(command, result.returncode, result.stdout))
             if result.returncode not in {0, 1}:
                 raise RuntimeError(
-                    f"mongo_c_driver target {test} exited {result.returncode}; see {log_path}"
+                    f"mongo-c-driver target {test} exited {result.returncode}; "
+                    f"see {log_path}"
                 )
             outcome = mongo_c_driver_adapter_outcomes(result.stdout).get(test)
             if outcome is None:
-                raise RuntimeError(f"mongo_c_driver target outcome was not observed: {test}")
+                raise RuntimeError(
+                    f"mongo-c-driver target outcome was not observed: {test}"
+                )
             if outcome != "failed":
                 continue
             failed.append(test)
@@ -598,12 +609,16 @@ def observe_regression_tests(
         log.write(command_section(command, result.returncode, result.stdout))
     if result.returncode not in {0, 1}:
         raise RuntimeError(
-            f"mongo_c_driver regression selection exited {result.returncode}; see {log_path}"
+            f"mongo-c-driver regression selection exited {result.returncode}; "
+            f"see {log_path}"
         )
     outcomes = mongo_c_driver_adapter_outcomes(result.stdout)
     missing = [test for test in tests if test not in outcomes]
     if missing:
-        raise RuntimeError("mongo_c_driver regression outcomes are missing for: " + ", ".join(missing))
+        raise RuntimeError(
+            "mongo-c-driver regression outcomes are missing for: "
+            + ", ".join(missing)
+        )
     return {test: outcomes[test] for test in tests}
 
 
@@ -656,11 +671,13 @@ def verify_fixed_oracle(
                 log.write(command_section(command, result.returncode, result.stdout))
                 if result.returncode not in {0, 1}:
                     raise RuntimeError(
-                        f"Fixed mongo_c_driver target {test} exited {result.returncode}"
+                        f"Fixed mongo-c-driver target {test} exited {result.returncode}"
                     )
                 outcome = mongo_c_driver_adapter_outcomes(result.stdout).get(test)
                 if outcome is None:
-                    raise RuntimeError(f"Fixed mongo_c_driver target was not observed: {test}")
+                    raise RuntimeError(
+                        f"Fixed mongo-c-driver target was not observed: {test}"
+                    )
                 fixed_results[test] = outcome
         regression_outcomes = observe_regression_tests(
             runtime=runtime,
@@ -763,7 +780,9 @@ def validate_test_ids(tests: Iterable[str], available: Iterable[str]) -> None:
         if not re.fullmatch(r"/[A-Za-z0-9_./:+-]+", test):
             raise ValueError(f"Unsafe mongo-c-driver test id: {test!r}")
         if test not in available_set:
-            raise FileNotFoundError(f"Declared mongo_c_driver test is missing: {test}")
+            raise FileNotFoundError(
+                f"Declared mongo-c-driver test is missing: {test}"
+            )
 
 
 def input_ready(project_root: Path, config_path: Path, failure_path: Path) -> bool:

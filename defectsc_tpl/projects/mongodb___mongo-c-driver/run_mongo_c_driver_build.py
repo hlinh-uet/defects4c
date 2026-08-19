@@ -81,9 +81,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     if returncode != 0:
         return returncode
+    root = Path.cwd()
     required = (
-        BUILD_DIR / "src" / "libbson" / "test-libbson",
-        Path("src/libbson/tests/binary"),
+        root / BUILD_DIR / "src" / "libbson" / "test-libbson",
+        root / "src" / "libbson" / "tests" / "binary",
     )
     missing = [str(path) for path in required if not path.exists()]
     if missing:
