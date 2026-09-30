@@ -95,7 +95,7 @@ Contract giống LLVM, PHP và SPIRV-Tools:
   buggy lẫn fixed;
 - test bổ sung không pass trên cả hai phía vẫn nằm trong tập đã chọn nhưng được
   ghi bằng `--exclude-test` trong regression command;
-- config dùng `schema_version=6`, ghim OCI image digest, chạy offline và khai
+- config dùng contract canonical, ghim OCI image digest, chạy offline và khai
   báo disposable workspace;
 - cây input cuối cùng được materialize lại sạch, không chứa `.git` hoặc build
   artifact của bước prepare.

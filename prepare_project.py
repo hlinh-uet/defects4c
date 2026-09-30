@@ -328,6 +328,9 @@ def write_validation_contract(
 ) -> None:
     contract_dir = target / ".debugging-framework"
     contract_dir.mkdir(parents=True, exist_ok=True)
+    test_id = "recipe::" + safe_name(
+        str((bug.get("type") or {}).get("id") or bug.get("commit_after") or "case")
+    )
     context = recipe_context(project_meta, bug, jobs)
     build_template = resolve_template(recipe_dir, context.get("build"), "common_build_tpl.jinja")
     test_template = resolve_template(recipe_dir, context.get("test"), "common_test_tpl.jinja")
@@ -354,9 +357,7 @@ exec bash .debugging-framework/recipe_build_impl.sh \
   .debugging-framework/build .debugging-framework/build.log
 """,
     )
-    write_executable(
-        contract_dir / "recipe_test.sh",
-        """#!/usr/bin/env bash
+    test_wrapper = """#!/usr/bin/env bash
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
@@ -370,6 +371,7 @@ recipe_rc=$?
 [[ -f "$msg_file" ]] && cat "$msg_file"
 [[ -f "$log" ]] && cat "$log"
 if [[ $recipe_rc -ne 0 ]]; then
+  echo "FAILED __TEST_ID__"
   exit "$recipe_rc"
 fi
 if [[ ! -s "$status_file" ]]; then
@@ -378,19 +380,36 @@ if [[ ! -s "$status_file" ]]; then
 fi
 status=$(tr '[:upper:]' '[:lower:]' < "$status_file")
 if [[ "$status" == *failed* || "$status" == *error* ]]; then
+  echo "FAILED __TEST_ID__"
   exit 1
 fi
 if [[ "$status" == *success* || "$status" == *pass* ]]; then
+  echo "PASSED __TEST_ID__"
   exit 0
 fi
 echo "unrecognized recipe test status: $status" >&2
 exit 2
-""",
+"""
+    write_executable(
+        contract_dir / "recipe_test.sh",
+        test_wrapper.replace("__TEST_ID__", test_id),
     )
     contract = {
         "system": "defects4c-rendered-recipe",
         "build": [["bash", ".debugging-framework/recipe_build.sh"]],
-        "test": [["bash", ".debugging-framework/recipe_test.sh"]],
+        "regression_test": [
+            {
+                "command": ["bash", ".debugging-framework/recipe_test.sh"],
+                "evidence_pattern": rf"^(?:PASSED|FAILED)\s+{re.escape(test_id)}$",
+                "failure_pattern": rf"^FAILED\s+{re.escape(test_id)}$",
+            }
+        ],
+        "repair": {"failing_tests": [test_id]},
+        "workspace": {
+            "disposable": True,
+            "initialize_git_if_missing": True,
+        },
+        "environment": {"mode": "host"},
     }
     (target / ".debugging-framework.json").write_text(
         json.dumps(contract, indent=2) + "\n", encoding="utf-8"

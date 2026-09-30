@@ -24,7 +24,7 @@ Pipeline tuân theo cùng contract với LLVM, PHP, SPIRV-Tools, tcpdump và cur
   nguồn, rồi chạy đúng cùng tập đó trên buggy và fixed;
 - test bổ sung không pass trên cả buggy và fixed vẫn thuộc tập đã chọn, nhưng
   được ghi bằng `--exclude-test` trong regression command;
-- config dùng `schema_version=6`, ghim OCI image digest, chạy offline và dùng
+- config dùng contract canonical, ghim OCI image digest, chạy offline và dùng
   disposable workspace;
 - input cuối được materialize lại sạch, không chứa `.git` hoặc build artifact
   từ bước prepare.

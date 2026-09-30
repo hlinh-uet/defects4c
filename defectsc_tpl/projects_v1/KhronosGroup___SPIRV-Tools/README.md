@@ -63,7 +63,7 @@ Contract prepare áp dụng cùng policy với LLVM/PHP:
   sắp ổn định theo case id/commit;
 - case bổ sung không `passed` trên cả buggy và fixed được ghi thành
   `--exclude-test` trong regression command;
-- config ghim OCI image digest, khai báo `schema_version=6` và disposable
+- config ghim OCI image digest và khai báo disposable
   workspace để Framework tạo Git baseline tạm.
 
 Xem lệnh Framework của một input đã prepare:

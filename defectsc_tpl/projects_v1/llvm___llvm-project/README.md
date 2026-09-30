@@ -1,7 +1,7 @@
 # LLVM — Debugging-Framework workspace lớn
 
 Adapter này giữ **toàn bộ `llvm-project` workspace** và đóng gói từng defect
-thành input schema v6 cho Debugging-Framework. Git history không được chép vào
+thành input schema v7 cho Debugging-Framework. Git history không được chép vào
 input; source tree vẫn đầy đủ.
 
 ## Tài nguyên

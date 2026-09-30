@@ -62,7 +62,7 @@ Contract giống LLVM/PHP:
   cùng GoogleTest suite với target;
 - cùng tập test bổ sung được chạy trên buggy và fixed; case không `passed` trên
   một trong hai phiên bản được truyền thành `--exclude-test` trong config;
-- config dùng `schema_version=6`, ghim OCI image digest, test adapter có bằng
+- config dùng contract canonical, ghim OCI image digest, test adapter có bằng
   chứng thực thi và workspace disposable; validation/repair chạy offline.
 
 Kiểm tra hoặc chạy repair một defect đã prepare:

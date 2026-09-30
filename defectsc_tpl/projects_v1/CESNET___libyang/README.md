@@ -63,7 +63,7 @@ Không tạo `results/`, `outputs/`, manifest hay audit logs trong Defects4C.
 Muốn tạo lại input, thêm `--force`. Nếu image tag đã được build lại thành digest
 mới, adapter cũng yêu cầu `--force` để không tái sử dụng config ghim image cũ.
 
-Config sinh ra dùng `schema_version=6` và lưu đầy đủ contract mà Framework cần:
+Config sinh ra lưu đầy đủ contract canonical mà Framework cần:
 
 - `setup`: configure CMake với test enabled;
 - `build`: build bằng Ninja;

@@ -443,7 +443,6 @@ def write_framework_config(
         raise ValueError("At least one curl regression test must remain after exclusions")
     build_commands = validation_build_commands(jobs)
     config = {
-        "schema_version": 6,
         "system": "autotools",
         "setup": [build_commands[0]],
         "build": [build_commands[1]],
@@ -768,7 +767,7 @@ def framework_config_ready(config_path: Path) -> bool:
         value = read_json(config_path)
     except ValueError:
         return False
-    if not isinstance(value, dict) or value.get("schema_version") != 6:
+    if not isinstance(value, dict):
         return False
     target = value.get("target_test")
     regression = value.get("regression_test")
@@ -935,8 +934,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--command-timeout", type=int,
         help="Prepare uses 7200 seconds per curl command when omitted.",
     )
-    parser.add_argument("--codex-timeout", type=int)
-    parser.add_argument("--model", default="")
+    parser.add_argument("--agent-timeout", type=int)
+    parser.add_argument("--harness", default="")
+    parser.add_argument("--retrieval-model", default="")
+    parser.add_argument("--repair-model", default="")
     parser.add_argument("--framework-bin", type=Path, default=DEFAULT_FRAMEWORK_BIN)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--continue-on-error", action="store_true")
@@ -998,6 +999,7 @@ def main(argv: list[str] | None = None) -> int:
                 ]
                 if args.jobs is not None:
                     doctor.extend(["--jobs", str(args.jobs)])
+                append_agent_options(doctor, args)
                 print("[Debugging-Framework] doctor", flush=True)
                 returncode = run_command(doctor)
                 if returncode != 0:
@@ -1027,7 +1029,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    for name in ("jobs", "attempts", "command_timeout", "codex_timeout"):
+    for name in ("jobs", "attempts", "command_timeout", "agent_timeout"):
         value = getattr(args, name)
         if value is not None and value < 1:
             raise ValueError(f"--{name.replace('_', '-')} must be >= 1")
@@ -1068,6 +1070,16 @@ def resolve_framework_for_display(value: Path) -> Path:
         return value.expanduser().resolve()
 
 
+def append_agent_options(command: list[str], args: argparse.Namespace) -> None:
+    for flag, value in (
+        ("--harness", args.harness),
+        ("--retrieval-model", args.retrieval_model),
+        ("--repair-model", args.repair_model),
+    ):
+        if value:
+            command.extend([flag, value])
+
+
 def build_repair_command(
     args: argparse.Namespace,
     framework_bin: Path,
@@ -1084,13 +1096,12 @@ def build_repair_command(
     for flag, value in (
         ("--attempts", args.attempts),
         ("--command-timeout", args.command_timeout),
-        ("--codex-timeout", args.codex_timeout),
+        ("--agent-timeout", args.agent_timeout),
         ("--jobs", args.jobs),
     ):
         if value is not None:
             command.extend([flag, str(value)])
-    if args.model:
-        command.extend(["--model", args.model])
+    append_agent_options(command, args)
     return command
 
 
@@ -1118,6 +1129,7 @@ def print_commands(
     ]
     if args.jobs is not None:
         doctor.extend(["--jobs", str(args.jobs)])
+    append_agent_options(doctor, args)
     repair = build_repair_command(
         args, framework_bin, project_root, config_path, failure_path
     )

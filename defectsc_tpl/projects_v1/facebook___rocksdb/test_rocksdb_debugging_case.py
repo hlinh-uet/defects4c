@@ -176,6 +176,32 @@ class SelectionAndOracleTests(unittest.TestCase):
 
 
 class FrameworkContractTests(unittest.TestCase):
+    def test_framework_commands_forward_harness_neutral_agent_options(self) -> None:
+        args = SimpleNamespace(
+            attempts=2,
+            command_timeout=60,
+            agent_timeout=120,
+            jobs=4,
+            harness="openhands",
+            retrieval_model="retrieval-model",
+            repair_model="repair-model",
+        )
+        command = runner.build_repair_command(
+            args,
+            Path("debugging-framework"),
+            Path("project"),
+            Path("config.json"),
+            Path("failure.log"),
+        )
+        doctor = ["debugging-framework", "doctor"]
+        runner.append_agent_options(doctor, args)
+
+        for option in ("--harness", "--retrieval-model", "--repair-model"):
+            self.assertIn(option, command)
+            self.assertIn(option, doctor)
+        self.assertIn("--agent-timeout", command)
+        self.assertNotIn("--agent-timeout", doctor)
+
     def test_generated_config_is_ready(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
@@ -195,7 +221,6 @@ class FrameworkContractTests(unittest.TestCase):
             )
             config = json.loads(path.read_text(encoding="utf-8"))
             self.assertTrue(runner.framework_config_ready(path))
-            self.assertEqual(config["schema_version"], 6)
             self.assertEqual(
                 config["workspace"],
                 {"disposable": True, "initialize_git_if_missing": True},

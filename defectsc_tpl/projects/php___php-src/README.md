@@ -289,7 +289,7 @@ python3 defectsc_tpl/projects/php___php-src/run_debugging_case.py \
 5. Chọn deterministic tối đa 70 `.phpt` khác và chạy cùng tập trên buggy/fixed.
 6. Chỉ giữ target đạt `FAIL(buggy) -> PASS(fixed)`. Test bổ sung không pass
    trên cả hai baseline được ghi thành `--exclude-test`, không làm hỏng prepare.
-7. Publish source buggy sạch, config schema v6 và failure log tại:
+7. Publish source buggy sạch, config schema v7 và failure log tại:
 
 ```text
 out_tmp_dirs/debugging_framework/php/inputs/

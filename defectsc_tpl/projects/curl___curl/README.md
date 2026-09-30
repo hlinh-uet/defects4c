@@ -22,7 +22,7 @@ Pipeline áp dụng cùng contract với LLVM, PHP, SPIRV-Tools và tcpdump:
 - ngoài target, chọn ổn định tối đa 70 file `tests/data/testN`, rồi chạy đúng
   cùng tập đó trên buggy và fixed;
 - regression test không pass trên cả hai phía được ghi bằng `--exclude-test`;
-- config dùng `schema_version=6`, ghim OCI image digest, chạy offline và dùng
+- config dùng contract canonical, ghim OCI image digest, chạy offline và dùng
   disposable workspace;
 - input cuối được materialize lại sạch, không chứa `.git` hoặc build artifact
   từ bước prepare.

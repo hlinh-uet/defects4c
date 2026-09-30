@@ -58,6 +58,21 @@ python3 defectsc_tpl/projects_v1/CESNET___libyang/run_debugging_case.py repair \
   --all --continue-on-error
 ```
 
+Every strict project runner accepts the same harness-neutral overrides:
+`--harness`, `--retrieval-model`, `--repair-model`, and `--agent-timeout`.
+Provider credentials and endpoints remain in Debugging-Framework's `.env`, so
+the benchmark contract contains only build, test, workspace, and image details.
+For example, either Codex or OpenHands can repair the same prepared case without
+regenerating it:
+
+```bash
+python3 defectsc_tpl/projects_v1/CESNET___libyang/run_debugging_case.py repair \
+  --sha 92cc8517fcb85dcfbb93842758571f721c49c9cb \
+  --harness openhands \
+  --retrieval-model deepseek/deepseek-v4-flash-0731 \
+  --repair-model deepseek/deepseek-v4-flash-0731
+```
+
 The image installs dependencies once. The 15 cases are separate source/build
 trees and reuse that same image; they are not 15 toolchain installations.
 Inputs are stored under

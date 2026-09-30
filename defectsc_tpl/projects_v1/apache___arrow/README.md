@@ -26,7 +26,7 @@ curl và mongo-c-driver:
   đúng cùng tập đó trên buggy và fixed;
 - case bổ sung không pass trên cả hai phía vẫn thuộc tập đã chọn nhưng được ghi
   bằng `--exclude-test` trong regression command;
-- config dùng `schema_version=6`, ghim OCI image digest, chạy offline và dùng
+- config dùng contract canonical, ghim OCI image digest, chạy offline và dùng
   disposable workspace;
 - build artifact bị loại khỏi input cuối. Source submodule test-data được giữ
   lại vì là dependency runtime, không phải output build.
@@ -103,5 +103,5 @@ python3 \
   --jobs 2 \
   --attempts 2 \
   --command-timeout 7200 \
-  --codex-timeout 7200
+  --agent-timeout 7200
 ```
