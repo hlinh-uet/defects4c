@@ -265,7 +265,7 @@ cài hai adapter `defects4c-php-build` và `defects4c-php-test`:
 docker build -f Dockerfile.php -t php-src/defect4c:latest .
 ```
 
-Liệt kê 18 case:
+Liệt kê 12 case được hỗ trợ (6 case còn lại trong `bugs_list_new.json` không prepare được nên đã bị loại):
 
 ```bash
 python3 defectsc_tpl/projects/php___php-src/run_debugging_case.py --list

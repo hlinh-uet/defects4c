@@ -13,31 +13,50 @@ RUN apt-get update -yq && \
       build-essential gcc g++ gfortran \
       cmake ninja-build pkg-config ccache \
       git ca-certificates curl patch \
-      python3 \
+      python3 python-is-python3 \
       jq findutils coreutils grep sed diffutils gawk \
       procps util-linux bash tzdata \
-      libboost-all-dev libgtest-dev \
+      libboost-all-dev libgtest-dev libgmock-dev libgflags-dev \
       libre2-dev libutf8proc-dev rapidjson-dev libxsimd-dev \
       zlib1g-dev libbz2-dev libbrotli-dev \
       liblz4-dev libsnappy-dev libzstd-dev \
-      libprotobuf-dev protobuf-compiler \
+      libprotobuf-dev libprotoc-dev protobuf-compiler \
       libthrift-dev libjemalloc-dev \
       libssl-dev libcurl4-openssl-dev \
       libdouble-conversion-dev nlohmann-json3-dev \
       libgrpc++-dev libc-ares-dev libabsl-dev && \
     apt-get autoremove -y && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# Ubuntu's GoogleTest archives get embedded in both the test executable and
+# libarrow_testing.so, registering global destructors twice. Use one shared
+# GoogleTest/GoogleMock installation for every Arrow test target instead.
+RUN cmake -S /usr/src/googletest -B /tmp/arrow-googletest-build \
+      -DBUILD_SHARED_LIBS=ON \
+      -DCMAKE_BUILD_TYPE=Debug \
+      -DCMAKE_INSTALL_PREFIX=/opt/arrow-googletest \
+      -DCMAKE_INSTALL_LIBDIR=lib \
+      -DCMAKE_INSTALL_RPATH=/opt/arrow-googletest/lib \
+      -Dgtest_build_tests=OFF -Dgmock_build_tests=OFF && \
+    cmake --build /tmp/arrow-googletest-build --parallel 4 && \
+    cmake --install /tmp/arrow-googletest-build && \
+    rm -rf /tmp/arrow-googletest-build
+
 # The only dataset target requiring Apache ORC is pinned to ORC 1.8.0.  Keep
 # the verified source archive in the image so CMake's BUNDLED ORC path remains
-# usable when Debugging Framework validates with --network=none.
-RUN mkdir -p /opt/arrow-dependencies && \
-    curl -fsSL \
-      https://archive.apache.org/dist/orc/orc-1.8.0/orc-1.8.0.tar.gz \
-      -o /opt/arrow-dependencies/orc-1.8.0.tar.gz && \
-    echo "859d78bfded98405c32ccb2847b565a57bcc53f473a74087c1f750aeb5932e62  /opt/arrow-dependencies/orc-1.8.0.tar.gz" \
+# usable when Debugging Framework validates with --network=none.  The archive
+# is fetched on the host first because archive.apache.org can be unreachable
+# from Docker's build network:
+#   curl -fsSL https://archive.apache.org/dist/orc/orc-1.8.0/orc-1.8.0.tar.gz \
+#     -o docker_deps/orc-1.8.0.tar.gz
+COPY docker_deps/orc-1.8.0.tar.gz /opt/arrow-dependencies/orc-1.8.0.tar.gz
+RUN echo "859d78bfded98405c32ccb2847b565a57bcc53f473a74087c1f750aeb5932e62  /opt/arrow-dependencies/orc-1.8.0.tar.gz" \
       | sha256sum -c -
 
-ENV ARROW_ORC_URL=file:///opt/arrow-dependencies/orc-1.8.0.tar.gz
+# ORC only uses system compression libraries when these prefixes are set.
+# Arrow 10 omits ZLIB_HOME and misspells the forwarded ZSTD root variable.
+ENV ARROW_ORC_URL=file:///opt/arrow-dependencies/orc-1.8.0.tar.gz \
+    ZLIB_HOME=/usr \
+    ZSTD_HOME=/usr
 
 COPY defectsc_tpl/projects_v1/apache___arrow/run_arrow_tests.py \
      /usr/local/bin/defects4c-arrow-test

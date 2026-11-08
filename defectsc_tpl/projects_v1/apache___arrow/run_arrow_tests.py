@@ -7,11 +7,17 @@ import argparse
 import json
 import os
 import re
+import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+
+
+ARTIFACT_DIRECTORY = "defects4c-test-artifacts"
 
 
 @dataclass(frozen=True)
@@ -29,22 +35,31 @@ def run(
     env: dict[str, str] | None = None,
     timeout: int,
 ) -> subprocess.CompletedProcess:
-    try:
-        return subprocess.run(
-            command,
-            cwd=cwd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        output = str(exc.stdout or "") + str(exc.stderr or "")
-        return subprocess.CompletedProcess(command, 124, output + "\nTIMEOUT\n")
+    with subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        start_new_session=True,
+    ) as process:
+        try:
+            output, _ = process.communicate(timeout=timeout)
+            return subprocess.CompletedProcess(command, process.returncode, output)
+        except BaseException as exc:
+            # The Arrow wrapper has child processes writing .txt.raw. Stop the
+            # whole group before reading artifacts, including on interruption.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            output, _ = process.communicate()
+            if isinstance(exc, subprocess.TimeoutExpired):
+                return subprocess.CompletedProcess(command, 124, output + "\nTIMEOUT\n")
+            raise
 
 
 def ctest_entries(build_dir: Path, timeout: int) -> dict[str, CTestEntry]:
@@ -174,6 +189,49 @@ def parse_failed_gtests(output: str) -> list[str]:
     return failed
 
 
+def test_artifact_paths(build_dir: Path, entry: CTestEntry) -> list[Path]:
+    """Resolve the exact wrapper artifacts; never mix in another target's logs."""
+    for index, argument in enumerate(entry.command):
+        if Path(argument).name != "run-test.sh" or len(entry.command) < index + 4:
+            continue
+        output_root, run_type, executable = entry.command[index + 1:index + 4]
+        root = Path(output_root)
+        if not root.is_absolute():
+            root = Path(entry.working_directory or build_dir) / root
+        name = Path(executable).name.split(".", 1)[0]
+        return [
+            root / "build" / f"{run_type}-logs" / f"{name}{suffix}"
+            for suffix in (".txt.raw", ".txt", ".xml")
+        ]
+    return []
+
+
+def snapshot_test_artifacts(
+    build_dir: Path, test_id: str, paths: Iterable[Path],
+    command: list[str], returncode: int,
+) -> str:
+    """Save every wrapper artifact; return only the raw log for timeout output."""
+    existing = [path for path in paths if path.is_file()]
+    if not existing:
+        return ""
+    root = build_dir / ARTIFACT_DIRECTORY
+    root.mkdir(parents=True, exist_ok=True)
+    snapshot = Path(tempfile.mkdtemp(prefix="test-", dir=root))
+    metadata = {
+        "test_id": test_id, "command": command, "returncode": returncode,
+        "files": {path.name: str(path) for path in existing},
+    }
+    (snapshot / "test.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+    raw_log = ""
+    for path in existing:
+        saved = snapshot / path.name
+        shutil.copy2(path, saved)
+        if path.name.endswith(".txt.raw"):
+            content = saved.read_text(encoding="utf-8", errors="replace")
+            raw_log = f"===== artifact: {test_id}: {path.name} =====\n{content.rstrip()}\n"
+    return raw_log
+
+
 def run_one(
     build_dir: Path,
     entries: dict[str, CTestEntry],
@@ -196,8 +254,18 @@ def run_one(
             "-V", "--output-on-failure", "--timeout", str(timeout),
         ]
         cwd = build_dir.parent
+    paths = test_artifact_paths(build_dir, entry)
+    for path in paths:
+        path.unlink(missing_ok=True)
     result = run(command, cwd=cwd, env=env, timeout=timeout + 30)
     output = result.stdout
+    # Append diagnostics only after classification: XML/log content is not an
+    # adapter outcome and must not change the status of the current execution.
+    raw_log = snapshot_test_artifacts(build_dir, test_id, paths, command, result.returncode)
+    # Stdout already holds a finished test's output. Only a timeout cuts it
+    # short, leaving diagnostics in .txt.raw that the wrapper never printed.
+    timed_out = result.returncode == 124 or bool(re.search(r"\*\*\*Timeout", output))
+    full_output = output + ("\n" + raw_log if raw_log and timed_out else "")
     zero_tests = bool(
         re.search(r"Running\s+0\s+tests|0 tests? from 0 test|No tests were found", output)
     )
@@ -220,20 +288,20 @@ def run_one(
     if not case and expand_target_failures and failed:
         failed_cases = parse_failed_gtests(output)
         if failed_cases:
-            return ({f"{target}::{value}": "failed" for value in failed_cases}, output)
+            return ({f"{target}::{value}": "failed" for value in failed_cases}, full_output)
     if zero_tests:
-        return {test_id: "skipped"}, output
+        return {test_id: "skipped"}, full_output
     if skipped and not failure_evidence:
-        return {test_id: "skipped"}, output
+        return {test_id: "skipped"}, full_output
     if failed:
-        return {test_id: "failed"}, output
+        return {test_id: "failed"}, full_output
     if not observed:
-        return {test_id: "failed"}, output + "\nMissing test execution evidence\n"
-    return {test_id: "passed"}, output
+        return {test_id: "failed"}, full_output + "\nMissing test execution evidence\n"
+    return {test_id: "passed"}, full_output
 
 
 def emit_outcomes(outcomes: dict[str, str], output: str) -> int:
-    if any(outcome != "passed" for outcome in outcomes.values()) and output.strip():
+    if output.strip():
         print(output.rstrip())
     labels = {"passed": "PASSED", "failed": "FAILED", "skipped": "SKIPPED"}
     for test_id, outcome in outcomes.items():
@@ -282,8 +350,7 @@ def main(argv: list[str] | None = None) -> int:
             expand_target_failures=args.expand_target_failures,
         )
         outcomes.update(current)
-        if any(value != "passed" for value in current.values()):
-            outputs.append(output)
+        outputs.append(output)
     return emit_outcomes(outcomes, "\n".join(outputs))
 
 

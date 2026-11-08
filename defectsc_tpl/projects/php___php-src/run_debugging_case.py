@@ -38,6 +38,32 @@ PROJECT_NAME = "php___php-src"
 PHP_BUILD_COMMAND = "defects4c-php-build"
 PHP_TEST_COMMAND = "defects4c-php-test"
 REGRESSION_TEST_LIMIT = 70
+# Exact configure outputs absent from the historical snapshots' ignore rules.
+# These are build artifacts, not additional production patch extensions.
+PHP_GENERATED_ARTIFACTS = [
+    "ext/iconv/php_iconv_broken_ignore.h",
+    "sapi/fpm/php-fpm.8",
+    "sapi/fpm/php-fpm.service",
+    "sapi/fpm/status.html",
+    "sapi/fpm/www.conf",
+]
+# Cases evaluated with Debugging-Framework. The other six entries of
+# bugs_list_new.json (CVE-2016-5766, CVE-2016-7130, CVE-2016-7413,
+# CVE-2016-10160, CVE-2016-10158, CVE-2018-7584) fail `prepare`.
+SUPPORTED_CASE_IDS = (
+    "CVE-2016-3132__28a6ed9f9a36",
+    "CVE-2016-5096__abd159cce48f",
+    "CVE-2016-5772__a44c89e8af7c",
+    "CVE-2016-7129__426aeb280895",
+    "CVE-2016-7128__6dbb1ee46b5f",
+    "CVE-2016-7127__1bd103df00f4",
+    "CVE-2016-7126__28022c9b1fd9",
+    "CVE-2016-9936__b2af4e886872",
+    "CVE-2016-9933__863d37ea66d5",
+    "CVE-2016-10159__ca46d0acbce5",
+    "CVE-2016-10162__8d2539fa0faf",
+    "CVE-2017-7272__bab0b99f376d",
+)
 TEST_EVIDENCE_PATTERN = r"^(?:PASSED|FAILED|SKIPPED)\s+\S+"
 TEST_FAILURE_PATTERN = r"^FAILED\s+\S+"
 
@@ -51,7 +77,11 @@ def load_bugs() -> list[dict]:
     value = read_json(BUGS_PATH)
     if not isinstance(value, list):
         raise ValueError(f"Bug list must be an array: {BUGS_PATH}")
-    return value
+    supported = [bug for bug in value if case_id_for(bug) in SUPPORTED_CASE_IDS]
+    if len(supported) != len(SUPPORTED_CASE_IDS):
+        missing = set(SUPPORTED_CASE_IDS) - {case_id_for(bug) for bug in supported}
+        raise ValueError(f"Supported cases missing from {BUGS_PATH}: {sorted(missing)}")
+    return supported
 
 
 def select_bugs(
@@ -465,6 +495,7 @@ def write_framework_config(
         "workspace": {
             "disposable": True,
             "initialize_git_if_missing": True,
+            "generated_artifacts": PHP_GENERATED_ARTIFACTS,
         },
         "environment": {"mode": "image", "runtime": runtime, "image": image},
     }
@@ -516,6 +547,8 @@ def observe_target_tests(
     sections: dict[str, str] = {}
     with log_path.open("w", encoding="utf-8") as log:
         for test in tests:
+            for artifact in phpt_result_artifacts(project_root, test).values():
+                artifact.unlink(missing_ok=True)
             command = php_test_command(tests=[test])
             result = run_in_image(runtime, image, project_root, command, timeout=timeout)
             log.write(command_section(command, result.returncode, result.stdout))
@@ -531,8 +564,25 @@ def observe_target_tests(
             failed.append(test)
             sections[test] = (
                 f"===== failing_test: {test} =====\n{result.stdout.rstrip()}\n"
+                + phpt_result_details(project_root, test)
             )
     return failed, sections
+
+
+def phpt_result_artifacts(project_root: Path, test: str) -> dict[str, Path]:
+    # run-tests.php writes these beside the test (default log format LEODS);
+    # its stdout carries only the FAIL line and summary.
+    stem = test.removesuffix(".phpt")
+    return {kind: project_root / f"{stem}.{kind}" for kind in ("diff", "out")}
+
+
+def phpt_result_details(project_root: Path, test: str) -> str:
+    blocks = []
+    for kind, artifact in phpt_result_artifacts(project_root, test).items():
+        if artifact.is_file():
+            content = artifact.read_text(encoding="utf-8", errors="replace").rstrip()
+            blocks.append(f"===== {kind}: {test} =====\n{content}\n")
+    return "".join(blocks)
 
 
 def observe_regression_tests(
@@ -851,8 +901,10 @@ def upgrade_workspace_contract(config_path: Path) -> None:
         extensions.append(".re")
         changed = True
     workspace = {
+        **(value.get("workspace") or {}),
         "disposable": True,
         "initialize_git_if_missing": True,
+        "generated_artifacts": PHP_GENERATED_ARTIFACTS,
     }
     if value.get("workspace") != workspace:
         value["workspace"] = workspace
@@ -912,7 +964,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--bug", "--sha", dest="selectors", action="append",
         help="Unique bug type.id or commit_after prefix; repeatable.",
     )
-    selection.add_argument("--all", action="store_true", help="Process all 18 bugs.")
+    selection.add_argument("--all", action="store_true", help="Process all 12 supported bugs.")
     selection.add_argument("--list", action="store_true", help="List bugs and exit.")
     parser.add_argument("--inputs-root", type=Path, default=DEFAULT_INPUTS_ROOT)
     parser.add_argument("--cache-root", type=Path, default=DEFAULT_CACHE_ROOT)

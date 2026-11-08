@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -14,8 +15,11 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from pathlib import Path
-from typing import Iterable
+import traceback
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path, PurePosixPath
+from typing import Callable, Iterable
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -41,6 +45,8 @@ DEFAULT_IMAGE = "arrow/defect4c:latest"
 PROJECT_NAME = "apache___arrow"
 BUILD_DIR = ".debugging-framework/build"
 TEST_ADAPTER_COMMAND = "defects4c-arrow-test"
+GTEST_CMAKE_DIR = "/opt/arrow-googletest/lib/cmake/GTest"
+TEST_ARTIFACT_DIRECTORY = "defects4c-test-artifacts"
 REGRESSION_TEST_LIMIT = 70
 ARROW_SUBMODULES = (
     ("testing", "https://github.com/apache/arrow-testing.git"),
@@ -57,6 +63,41 @@ if str(DEFECTS4C_ROOT) not in sys.path:
     sys.path.insert(0, str(DEFECTS4C_ROOT))
 
 import prepare_project as materializer  # noqa: E402
+
+
+class PrepareReport:
+    """Keep diagnostics outside the disposable source/staging directories."""
+
+    def __init__(self, inputs_root: Path, case_id: str, **metadata: object) -> None:
+        root = inputs_root.parent / "prepare-logs" / case_id
+        root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ-")
+        self.directory = Path(tempfile.mkdtemp(prefix=stamp, dir=root))
+        self.manifest = {
+            "schema_version": 1,
+            "case_id": case_id,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "status": "running",
+            "stage": "metadata",
+            "outcomes": {},
+            **metadata,
+        }
+        self.update()
+
+    def update(self, **values: object) -> None:
+        self.manifest.update(values)
+        temporary = self.directory / "manifest.json.tmp"
+        temporary.write_text(
+            json.dumps(self.manifest, indent=2) + "\n", encoding="utf-8"
+        )
+        temporary.replace(self.directory / "manifest.json")
+
+    def record_outcomes(self, phase: str, outcomes: dict[str, str]) -> None:
+        self.manifest["outcomes"].setdefault(phase, {}).update(outcomes)
+        self.update()
+
+
+OutcomeRecorder = Callable[[str, dict[str, str]], None]
 
 
 def load_bugs() -> list[dict]:
@@ -129,22 +170,37 @@ def prepare_case(
     project_root = staging / case_id
     config_path = staging / f"{case_id}.debugging-framework.json"
     failure_path = staging / f"{case_id}.failure.log"
-    work_dir = staging / ".prepare-work"
-    work_dir.mkdir()
-
-    commit_after = required_sha(bug, "commit_after")
-    commit_before = required_sha(bug, "commit_before")
-    source_files = materializer.source_files(bug)
-    declared_targets = candidate_targets(bug)
-    if not declared_targets:
-        raise ValueError(f"{case_id}: no Arrow CTest target declared")
+    report = PrepareReport(
+        inputs_root, case_id,
+        commit_after=bug.get("commit_after"),
+        commit_before=bug.get("commit_before"),
+        environment={"runtime": runtime, "image": image},
+        jobs=jobs,
+        command_timeout=command_timeout,
+        inputs={"project": str(final_project), "config": str(final_config),
+                "failure_log": str(final_failure)},
+    )
+    work_dir = report.directory
+    print(f"[prepare logs] {work_dir}", flush=True)
 
     try:
+        commit_after = required_sha(bug, "commit_after")
+        commit_before = required_sha(bug, "commit_before")
+        source_files = materializer.source_files(bug)
+        declared_targets = candidate_targets(bug)
+        if not declared_targets:
+            raise ValueError(f"{case_id}: no Arrow CTest target declared")
+        report.update(
+            stage="source-cache", source_files=source_files,
+            declared_targets=declared_targets,
+        )
         source_repo = ensure_source_cache(
             cache_root=cache_root,
             remote=str(project_meta.get("main_repo") or ""),
             commits=(commit_after, commit_before),
+            log_path=work_dir / "source-cache.log",
         )
+        report.update(stage="buggy-materialization")
         materialize_snapshot(
             source_repo=source_repo,
             target=project_root,
@@ -152,13 +208,15 @@ def prepare_case(
             commit_before=commit_before,
             source_files=source_files,
         )
-        provision_dependencies(
+        report.update(stage="dependencies")
+        dependencies = provision_dependencies(
             source_repo=source_repo,
             cache_root=cache_root,
             commit=commit_after,
             project_root=project_root,
             log_path=work_dir / "dependency-sync.log",
         )
+        report.update(dependencies=dependencies, stage="buggy-build")
         remove_git_metadata(project_root)
         run_commands_logged(
             runtime=runtime,
@@ -168,6 +226,7 @@ def prepare_case(
             log_path=work_dir / "buggy-build.log",
             timeout=command_timeout,
         )
+        report.update(stage="buggy-target-tests")
         failed_tests, failure_sections = observe_buggy_targets(
             runtime=runtime,
             image=image,
@@ -175,12 +234,22 @@ def prepare_case(
             targets=declared_targets,
             log_path=work_dir / "buggy-target-tests.log",
             timeout=command_timeout,
+            record_outcomes=report.record_outcomes,
+        )
+        report.update(
+            reproduced_failing_tests=failed_tests,
+            excluded_unreproduced_tests={
+                test: {"reason": "not_failed_in_isolation", "buggy": outcome}
+                for test, outcome in report.manifest["outcomes"].get("buggy-isolated", {}).items()
+                if outcome != "failed"
+            },
         )
         if not failed_tests:
             raise RuntimeError(
-                f"{case_id}: none of the declared Arrow targets failed: "
+                f"{case_id}: no declared Arrow test reproduced failure in isolation: "
                 + ", ".join(declared_targets)
             )
+        report.update(stage="test-discovery")
         discovered_tests = discover_arrow_tests(
             runtime=runtime,
             image=image,
@@ -194,8 +263,12 @@ def prepare_case(
             excluded_tests=failed_tests,
             seed=case_id,
         )
+        report.update(
+            discovered_tests=discovered_tests, selected_regression_tests=regression_tests,
+        )
         if not regression_tests:
             raise RuntimeError(f"{case_id}: no supplemental Arrow regression tests found")
+        report.update(stage="buggy-regression-tests")
         buggy_regression_outcomes = observe_tests(
             runtime=runtime,
             image=image,
@@ -203,9 +276,11 @@ def prepare_case(
             tests=regression_tests,
             log_path=work_dir / "buggy-regression-tests.log",
             timeout=command_timeout,
+            record_outcomes=report.record_outcomes,
         )
 
         clear_build_artifacts(project_root)
+        report.update(stage="fixed-verification")
         fixed_results, fixed_regression_outcomes = verify_fixed_oracle(
             source_repo=source_repo,
             dependency_source=project_root,
@@ -219,11 +294,16 @@ def prepare_case(
             regression_tests=regression_tests,
             timeout=command_timeout,
             log_path=work_dir / "fixed-verification.log",
+            record_outcomes=report.record_outcomes,
         )
         eligible_tests = [
             test for test in failed_tests if fixed_results.get(test) == "passed"
         ]
         excluded_targets = [test for test in failed_tests if test not in eligible_tests]
+        report.update(
+            failing_tests=eligible_tests,
+            excluded_failing_tests={test: "not_passed_on_fixed" for test in excluded_targets},
+        )
         if excluded_targets:
             print(
                 f"[filter] {case_id}: loại target không pass trên fixed: "
@@ -241,6 +321,14 @@ def prepare_case(
             if buggy_regression_outcomes.get(test) != "passed"
             or fixed_regression_outcomes.get(test) != "passed"
         )
+        report.update(excluded_regression_tests={
+            test: {
+                "reason": "not_passed_on_both_baselines",
+                "buggy": buggy_regression_outcomes.get(test),
+                "fixed": fixed_regression_outcomes.get(test),
+            }
+            for test in excluded_regression_tests
+        })
         if excluded_regression_tests:
             print(
                 f"[filter] {case_id}: loại regression không pass trên cả buggy và fixed: "
@@ -252,6 +340,7 @@ def prepare_case(
                 f"{case_id}: no supplemental Arrow regression test passes on both versions"
             )
 
+        report.update(stage="write-config")
         failure_path.write_text(
             "\n".join(
                 failure_sections[test].rstrip() for test in eligible_tests
@@ -269,16 +358,44 @@ def prepare_case(
             regression_tests=regression_tests,
             excluded_regression_tests=excluded_regression_tests,
         )
+        shutil.copy2(config_path, work_dir / config_path.name)
+        shutil.copy2(failure_path, work_dir / failure_path.name)
 
-        clear_build_artifacts(project_root)
+        # Recreate the input from Git as PHP does: builds and test runs can leave
+        # files outside the build directory, and the copy back never deletes.
+        report.update(stage="clean-input")
+        shutil.rmtree(project_root)
+        materialize_snapshot(
+            source_repo=source_repo,
+            target=project_root,
+            commit_after=commit_after,
+            commit_before=commit_before,
+            source_files=source_files,
+        )
+        provision_dependencies(
+            source_repo=source_repo,
+            cache_root=cache_root,
+            commit=commit_after,
+            project_root=project_root,
+            log_path=work_dir / "final-dependency-sync.log",
+        )
         remove_git_metadata(project_root)
-        shutil.rmtree(work_dir)
+        report.update(stage="publish")
         project_root.rename(final_project)
         config_path.rename(final_config)
         failure_path.rename(final_failure)
         staging.rmdir()
+        report.update(
+            status="success", stage="complete",
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
         return final_project, final_config, final_failure
-    except BaseException:
+    except BaseException as exc:
+        (work_dir / "error.log").write_text(traceback.format_exc(), encoding="utf-8")
+        report.update(
+            status="failed", error={"type": type(exc).__name__, "message": str(exc)},
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
         shutil.rmtree(staging, ignore_errors=True)
         if not input_ready(final_project, final_config, final_failure):
             remove_project_input(final_project, inputs_root, case_id)
@@ -288,7 +405,7 @@ def prepare_case(
 
 
 def ensure_source_cache(
-    *, cache_root: Path, remote: str, commits: Iterable[str]
+    *, cache_root: Path, remote: str, commits: Iterable[str], log_path: Path | None = None
 ) -> Path:
     if not remote:
         raise ValueError("Arrow project.json has no main_repo")
@@ -308,6 +425,7 @@ def ensure_source_cache(
                 str(cache),
             ],
             timeout=60 * 30,
+            log_path=log_path,
         )
     for sha in commits:
         if git_has_commit(cache, sha):
@@ -324,6 +442,7 @@ def ensure_source_cache(
                 sha,
             ],
             timeout=60 * 20,
+            log_path=log_path,
         )
         if not git_has_commit(cache, sha):
             raise RuntimeError(f"Fetched Arrow cache does not contain commit: {sha}")
@@ -390,8 +509,8 @@ def provision_dependencies(
     commit: str,
     project_root: Path,
     log_path: Path,
-) -> None:
-    lines: list[str] = []
+) -> list[dict[str, str]]:
+    dependencies: list[dict[str, str]] = []
     for relpath, remote in ARROW_SUBMODULES:
         sha = submodule_sha(source_repo, commit, relpath)
         cache = ensure_dependency_cache(
@@ -399,6 +518,7 @@ def provision_dependencies(
             name=Path(relpath).name,
             remote=remote,
             commit=sha,
+            log_path=log_path,
         )
         destination = project_root / relpath
         if destination.exists():
@@ -407,8 +527,10 @@ def provision_dependencies(
             else:
                 destination.unlink()
         materialize_git_tree(cache, destination, sha)
-        lines.append(f"{relpath}\t{sha}\t{remote}")
-    log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        dependencies.append({"path": relpath, "commit": sha, "remote": remote})
+        with log_path.open("a", encoding="utf-8") as log:
+            log.write(f"{relpath}\t{sha}\t{remote}\n")
+    return dependencies
 
 
 def submodule_sha(source_repo: Path, commit: str, relpath: str) -> str:
@@ -435,7 +557,8 @@ def submodule_sha(source_repo: Path, commit: str, relpath: str) -> str:
 
 
 def ensure_dependency_cache(
-    *, cache_root: Path, name: str, remote: str, commit: str
+    *, cache_root: Path, name: str, remote: str, commit: str,
+    log_path: Path | None = None,
 ) -> Path:
     cache = cache_root / PROJECT_NAME / "dependencies" / name
     if not (cache / ".git").is_dir():
@@ -453,6 +576,7 @@ def ensure_dependency_cache(
                 str(cache),
             ],
             timeout=60 * 30,
+            log_path=log_path,
         )
     if not git_has_commit(cache, commit):
         run_checked(
@@ -467,6 +591,7 @@ def ensure_dependency_cache(
                 commit,
             ],
             timeout=60 * 20,
+            log_path=log_path,
         )
     if not git_has_commit(cache, commit):
         raise RuntimeError(f"Arrow dependency cache lacks commit: {commit}")
@@ -505,8 +630,13 @@ def validate_archive_member(member: tarfile.TarInfo, label: str) -> None:
     if path.is_absolute() or ".." in path.parts:
         raise RuntimeError(f"Unsafe path in {label} archive: {member.name}")
     if member.issym() or member.islnk():
-        link = Path(member.linkname)
-        if link.is_absolute() or ".." in link.parts:
+        link = PurePosixPath(member.linkname)
+        # Symlink targets resolve from the link's directory; Arrow uses
+        # in-tree ones such as python/cmake_modules -> ../cpp/cmake_modules.
+        # Hard link targets are archive-root paths.
+        base = PurePosixPath(member.name).parent if member.issym() else PurePosixPath()
+        resolved = posixpath.normpath((base / link).as_posix())
+        if link.is_absolute() or resolved == ".." or resolved.startswith("../"):
             raise RuntimeError(
                 f"Unsafe link in {label} archive: {member.name} -> {member.linkname}"
             )
@@ -567,6 +697,7 @@ def arrow_feature_flags(targets: Iterable[str]) -> list[str]:
         "-DARROW_PARQUET=OFF",
         "-DARROW_DEPENDENCY_SOURCE=SYSTEM",
         "-DGTest_SOURCE=SYSTEM",
+        f"-DGTest_DIR={GTEST_CMAKE_DIR}",
         f"-DORC_SOURCE={'BUNDLED' if orc else 'SYSTEM'}",
     ]
 
@@ -576,14 +707,17 @@ def validation_build_commands(jobs: int, targets: Iterable[str]) -> list[list[st
     build_targets = cmake_targets(selected_targets)
     if not build_targets:
         raise ValueError("Arrow build requires at least one test target")
+    # The ORC test links liborc.a explicitly. Linking Arrow shared as well
+    # registers ORC's protobuf descriptors twice before GoogleTest can start.
+    static_orc = any("-orc-" in target for target in selected_targets)
     return [
         [
             "cmake", "-G", "Ninja", "-S", "cpp", "-B", BUILD_DIR,
             "-DCMAKE_BUILD_TYPE=Debug",
             "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
             "-DARROW_BUILD_TESTS=ON",
-            "-DARROW_BUILD_SHARED=ON",
-            "-DARROW_BUILD_STATIC=OFF",
+            f"-DARROW_BUILD_SHARED={'OFF' if static_orc else 'ON'}",
+            f"-DARROW_BUILD_STATIC={'ON' if static_orc else 'OFF'}",
             "-DARROW_BUILD_BENCHMARKS=OFF",
             "-DARROW_BUILD_EXAMPLES=OFF",
             "-DARROW_BUILD_INTEGRATION=OFF",
@@ -591,6 +725,9 @@ def validation_build_commands(jobs: int, targets: Iterable[str]) -> list[list[st
             "-DARROW_USE_ASAN=OFF",
             "-DARROW_USE_UBSAN=OFF",
             "-DARROW_USE_WERROR=OFF",
+            # Older Arrow releases ignore ARROW_USE_WERROR and append -Werror
+            # in Debug/CHECKIN builds, overriding our earlier -Wno-error.
+            "-DBUILD_WARNING_LEVEL=PRODUCTION",
             "-DARROW_JEMALLOC=OFF",
             "-DARROW_MIMALLOC=OFF",
             "-DARROW_USE_CCACHE=OFF",
@@ -705,7 +842,9 @@ def discover_arrow_tests(
     timeout: int,
 ) -> list[str]:
     command = discovery_command(targets)
-    result = run_in_image(runtime, image, project_root, command, timeout=timeout)
+    result = run_test_with_artifacts(
+        runtime, image, project_root, command, log_path=log_path, timeout=timeout
+    )
     log_path.write_text(
         command_section(command, result.returncode, result.stdout), encoding="utf-8"
     )
@@ -773,28 +912,57 @@ def observe_buggy_targets(
     targets: list[str],
     log_path: Path,
     timeout: int,
+    record_outcomes: OutcomeRecorder | None = None,
 ) -> tuple[list[str], dict[str, str]]:
     failed: list[str] = []
     sections: dict[str, str] = {}
+    seen: set[str] = set()
     with log_path.open("w", encoding="utf-8") as log:
         for target in targets:
             command = arrow_target_command(target)
-            result = run_in_image(runtime, image, project_root, command, timeout=timeout)
+            result = run_test_with_artifacts(
+                runtime, image, project_root, command, log_path=log_path, timeout=timeout
+            )
             log.write(command_section(command, result.returncode, result.stdout))
             if result.returncode not in {0, 1}:
                 raise RuntimeError(
                     f"Arrow target {target} exited {result.returncode}; see {log_path}"
                 )
             outcomes = adapter_outcomes(result.stdout)
+            if record_outcomes:
+                record_outcomes("buggy-target", outcomes)
             if not outcomes:
                 raise RuntimeError(f"Arrow target was not observed: {target}")
             current = [test for test, outcome in outcomes.items() if outcome == "failed"]
             for test in current:
-                if test not in failed:
-                    failed.append(test)
-                    sections[test] = (
-                        f"===== failing_test: {test} =====\n{result.stdout.rstrip()}\n"
+                if test in seen:
+                    continue
+                seen.add(test)
+                # The target run interleaves every case's output; rerun the
+                # failing case alone so the log leads with its assertion.
+                case_command = arrow_test_command(test)
+                case_result = run_test_with_artifacts(
+                    runtime, image, project_root, case_command, log_path=log_path, timeout=timeout
+                )
+                log.write(
+                    command_section(case_command, case_result.returncode, case_result.stdout)
+                )
+                if case_result.returncode not in {0, 1}:
+                    raise RuntimeError(
+                        f"Isolated Arrow test {test} exited {case_result.returncode}; see {log_path}"
                     )
+                outcome = adapter_outcomes(case_result.stdout).get(test)
+                if outcome is None:
+                    raise RuntimeError(f"Isolated Arrow test was not observed: {test}")
+                if record_outcomes:
+                    record_outcomes("buggy-isolated", {test: outcome})
+                if outcome != "failed":
+                    log.write(f"Excluded {test}: not failed in isolation ({outcome})\n")
+                    continue
+                failed.append(test)
+                sections[test] = (
+                    f"===== failing_test: {test} =====\n{case_result.stdout.rstrip()}\n"
+                )
     return failed, sections
 
 
@@ -807,14 +975,20 @@ def observe_tests(
     log_path: Path,
     timeout: int,
     append: bool = False,
+    record_outcomes: OutcomeRecorder | None = None,
+    phase: str = "buggy-regression",
 ) -> dict[str, str]:
     command = arrow_batch_command(tests)
-    result = run_in_image(runtime, image, project_root, command, timeout=timeout)
+    result = run_test_with_artifacts(
+        runtime, image, project_root, command, log_path=log_path, timeout=timeout
+    )
     with log_path.open("a" if append else "w", encoding="utf-8") as log:
         log.write(command_section(command, result.returncode, result.stdout))
     if result.returncode not in {0, 1}:
         raise RuntimeError(f"Arrow tests exited {result.returncode}; see {log_path}")
     outcomes = adapter_outcomes(result.stdout)
+    if record_outcomes:
+        record_outcomes(phase, outcomes)
     missing = [test for test in tests if test not in outcomes]
     if missing:
         raise RuntimeError("Arrow outcomes are missing for: " + ", ".join(missing))
@@ -835,6 +1009,7 @@ def verify_fixed_oracle(
     regression_tests: list[str],
     timeout: int,
     log_path: Path,
+    record_outcomes: OutcomeRecorder | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
     fixed_root = staging / ".fixed-verification-project"
     commit_after = required_sha(bug, "commit_after")
@@ -860,9 +1035,17 @@ def verify_fixed_oracle(
         with log_path.open("a", encoding="utf-8") as log:
             for test in target_tests:
                 command = arrow_test_command(test)
-                result = run_in_image(runtime, image, fixed_root, command, timeout=timeout)
+                result = run_test_with_artifacts(
+                    runtime, image, fixed_root, command, log_path=log_path, timeout=timeout
+                )
                 log.write(command_section(command, result.returncode, result.stdout))
+                if result.returncode not in {0, 1}:
+                    raise RuntimeError(
+                        f"Fixed Arrow test {test} exited {result.returncode}; see {log_path}"
+                    )
                 outcomes = adapter_outcomes(result.stdout)
+                if record_outcomes:
+                    record_outcomes("fixed-target", outcomes)
                 if test not in outcomes:
                     raise RuntimeError(f"Fixed Arrow test was not observed: {test}")
                 results[test] = outcomes[test]
@@ -874,6 +1057,8 @@ def verify_fixed_oracle(
             log_path=log_path,
             timeout=timeout,
             append=True,
+            record_outcomes=record_outcomes,
+            phase="fixed-regression",
         )
         return results, regression_outcomes
     finally:
@@ -910,6 +1095,7 @@ def run_in_image(
     network: bool = False,
 ) -> subprocess.CompletedProcess:
     network_args = [] if network else ["--network=none"]
+    container_name = "defects4c-arrow-" + uuid.uuid4().hex
     if sys.platform == "darwin":
         wrapper = (
             'workspace="/tmp/debugging-framework-workspace"; '
@@ -923,7 +1109,7 @@ def run_in_image(
             'exit "$command_status"'
         )
         argv = [
-            runtime, "run", "--rm", *network_args,
+            runtime, "run", "--rm", "--name", container_name, *network_args,
             "--user", f"{os.getuid()}:{os.getgid()}",
             "-e", "HOME=/tmp",
             "-v", f"{project_root.resolve()}:/input:rw",
@@ -932,7 +1118,7 @@ def run_in_image(
         ]
     else:
         argv = [
-            runtime, "run", "--rm", *network_args,
+            runtime, "run", "--rm", "--name", container_name, *network_args,
             "--user", f"{os.getuid()}:{os.getgid()}",
             "-e", "HOME=/tmp",
             "-v", f"{project_root.resolve()}:/workspace:rw",
@@ -950,10 +1136,84 @@ def run_in_image(
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        output = str(exc.stdout or "") + str(exc.stderr or "")
-        raise RuntimeError(
-            f"Command timed out after {timeout}s: {shlex.join(command)}\n{output}"
-        ) from exc
+        def decode(value: str | bytes | None) -> str:
+            return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value or ""
+
+        output = decode(exc.stdout) + decode(exc.stderr)
+        output += recover_image_test_artifacts(runtime, container_name, project_root, command)
+        return subprocess.CompletedProcess(
+            argv, 124, output + f"\nTIMEOUT after {timeout}s: {shlex.join(command)}\n"
+        )
+
+
+def recover_image_test_artifacts(
+    runtime: str, container: str, project_root: Path, command: list[str],
+) -> str:
+    """Rescue logs from the macOS temporary workspace before removing a timed-out container."""
+    notes: list[str] = []
+
+    def execute(arguments: list[str]) -> bool:
+        try:
+            result = subprocess.run(
+                [runtime, *arguments], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace", timeout=30, check=False,
+            )
+            if result.returncode == 0:
+                return True
+            notes.append(f"Artifact recovery {arguments[0]} failed: {result.stdout.strip()}")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            notes.append(f"Artifact recovery {arguments[0]} failed: {exc}")
+        return False
+
+    blocks: list[str] = []
+    try:
+        if command and command[0] == TEST_ADAPTER_COMMAND:
+            paused = execute(["pause", container])
+            try:
+                workspace = "/tmp/debugging-framework-workspace" if sys.platform == "darwin" else "/workspace"
+                with tempfile.TemporaryDirectory(prefix="arrow-recovery-") as directory:
+                    rescued = Path(directory)
+                    for source, name in (("build/test-logs", "live"), (TEST_ARTIFACT_DIRECTORY, "snapshots")):
+                        destination = rescued / name
+                        destination.mkdir()
+                        execute(["cp", f"{container}:{workspace}/{BUILD_DIR}/{source}/.", str(destination)])
+                    files = [path for path in rescued.rglob("*") if path.is_file()]
+                    if files:
+                        root = project_root / BUILD_DIR / TEST_ARTIFACT_DIRECTORY
+                        root.mkdir(parents=True, exist_ok=True)
+                        snapshot = root / ("interrupted-" + uuid.uuid4().hex)
+                        shutil.copytree(rescued, snapshot)
+                        (snapshot / "recovery.json").write_text(
+                            json.dumps({"command": command, "reason": "container_command_timeout"}, indent=2) + "\n",
+                            encoding="utf-8",
+                        )
+                        for path in sorted(files):
+                            if path.name.endswith(".txt.raw"):
+                                content = path.read_text(encoding="utf-8", errors="replace")
+                                blocks.append(f"===== recovered artifact: {path.relative_to(rescued)} =====\n{content.rstrip()}\n")
+            finally:
+                if paused:
+                    execute(["unpause", container])
+    finally:
+        # Killing just the Docker CLI leaves the container/test running.
+        execute(["rm", "--force", container])
+    return "\n" + "\n".join([*blocks, *notes])
+
+
+def run_test_with_artifacts(
+    runtime: str, image: str, project_root: Path, command: list[str], *,
+    log_path: Path, timeout: int,
+) -> subprocess.CompletedProcess:
+    try:
+        return run_in_image(runtime, image, project_root, command, timeout=timeout)
+    finally:
+        source = project_root / BUILD_DIR / TEST_ARTIFACT_DIRECTORY
+        if source.is_dir():
+            destination = log_path.parent / "test-artifacts" / log_path.stem
+            destination.mkdir(parents=True, exist_ok=True)
+            for snapshot in source.iterdir():
+                shutil.move(str(snapshot), str(destination / snapshot.name))
+            source.rmdir()
 
 
 def command_section(command: list[str], returncode: int, output: str) -> str:
@@ -1100,10 +1360,25 @@ def git_has_commit(repo: Path, sha: str) -> bool:
     return completed.returncode == 0
 
 
-def run_checked(command: list[str], *, timeout: int) -> None:
-    completed = subprocess.run(command, timeout=timeout, check=False)
+def run_checked(command: list[str], *, timeout: int, log_path: Path | None = None) -> None:
+    if log_path is None:
+        completed = subprocess.run(command, timeout=timeout, check=False)
+    else:
+        # Stream Git progress straight to disk, including partial output on timeout.
+        with log_path.open("a", encoding="utf-8") as log:
+            log.write(f"===== command: {shlex.join(command)} =====\n")
+            log.flush()
+            try:
+                completed = subprocess.run(
+                    command, stdout=log, stderr=subprocess.STDOUT, timeout=timeout, check=False
+                )
+            except subprocess.TimeoutExpired as exc:
+                log.write(f"\nTIMEOUT after {timeout}s\n")
+                raise RuntimeError(f"Command timed out; see {log_path}") from exc
+            log.write(f"\nreturncode: {completed.returncode}\n")
     if completed.returncode != 0:
-        raise RuntimeError(f"Command failed ({completed.returncode}): {shlex.join(command)}")
+        detail = f"; see {log_path}" if log_path else ""
+        raise RuntimeError(f"Command failed ({completed.returncode}){detail}: {shlex.join(command)}")
 
 
 def resolve_runtime(value: str) -> str:
@@ -1155,17 +1430,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--bug", "--sha", dest="selectors", action="append",
         help="Unique bug type.id or commit_after prefix; repeatable.",
     )
-    selection.add_argument("--all", action="store_true", help="Process all 11 bugs.")
+    selection.add_argument("--all", action="store_true", help="Process all bugs.")
     selection.add_argument("--list", action="store_true", help="List bugs and exit.")
     parser.add_argument("--inputs-root", type=Path, default=DEFAULT_INPUTS_ROOT)
     parser.add_argument("--cache-root", type=Path, default=DEFAULT_CACHE_ROOT)
     parser.add_argument("--image", default=DEFAULT_IMAGE)
     parser.add_argument("--runtime", default="docker")
-    parser.add_argument("--jobs", type=int, help="Prepare uses 2 when omitted.")
+    parser.add_argument("--jobs", type=int, help="Prepare uses 4 when omitted.")
     parser.add_argument("--attempts", type=int)
     parser.add_argument(
         "--command-timeout", type=int,
-        help="Prepare uses 3600 seconds per command when omitted.",
+        help="Prepare uses 7200 seconds per command when omitted.",
     )
     parser.add_argument("--agent-timeout", type=int)
     parser.add_argument("--harness", default="")
@@ -1195,8 +1470,8 @@ def main(argv: list[str] | None = None) -> int:
         runtime = resolve_runtime(args.runtime)
         image_id = inspect_image(runtime, args.image)
     overall_returncode = 0
-    prepare_jobs = args.jobs if args.jobs is not None else 2
-    prepare_timeout = args.command_timeout if args.command_timeout is not None else 3600
+    prepare_jobs = args.jobs if args.jobs is not None else 4
+    prepare_timeout = args.command_timeout if args.command_timeout is not None else 7200
     for index, bug in enumerate(selected, start=1):
         case_id = case_id_for(bug)
         project_root, config_path, failure_path = input_paths(inputs_root, case_id)
